@@ -1,0 +1,219 @@
+{
+  "types": {
+    "AtamEvaluation": { "links": {} },
+
+    "Stakeholder": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]}
+      }
+    },
+
+    "BusinessDriver": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]}
+      }
+    },
+
+    "Constraint": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]}
+      }
+    },
+
+    "QualityAttribute": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "motivatedBy": {"kind": "many", "target_types": ["BusinessDriver"]}
+      }
+    },
+
+    "Component": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "partOf": {"kind": "single", "target_types": ["Component"]}
+      }
+    },
+
+    "ArchitecturalDecision": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "constrainedBy": {"kind": "many", "target_types": ["Constraint"]},
+        "appliesTo": {"kind": "many", "target_types": ["Component"]}
+      }
+    },
+
+    "ArchitecturalApproach": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "realizedBy": {"kind": "many", "target_types": ["Component"]},
+        "recordedIn": {"kind": "many", "target_types": ["ArchitecturalDecision"]},
+        "refines": {"kind": "single", "target_types": ["ArchitecturalApproach"]}
+      }
+    },
+
+    "Scenario": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "qualityAttribute": {"kind": "single", "target_types": ["QualityAttribute"]},
+        "stimulatesArtifact": {"kind": "many", "target_types": ["Component"]},
+        "proposedBy": {"kind": "single", "target_types": ["Stakeholder"]},
+        "supersedes": {"kind": "single", "target_types": ["Scenario"]}
+      }
+    },
+
+    "ScenarioRating": {
+      "links": {
+        "scenario": {"kind": "single", "target_types": ["Scenario"]},
+        "replaces": {"kind": "single", "target_types": ["ScenarioRating"]}
+      }
+    },
+
+    "ScenarioVote": {
+      "links": {
+        "scenario": {"kind": "single", "target_types": ["Scenario"]},
+        "voter": {"kind": "single", "target_types": ["Stakeholder"]}
+      }
+    },
+
+    "ProbingQuestion": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "scenario": {"kind": "single", "target_types": ["Scenario"]},
+        "probesApproach": {"kind": "many", "target_types": ["ArchitecturalApproach"]},
+        "probesComponent": {"kind": "many", "target_types": ["Component"]},
+        "sourceBankProbe": {"kind": "single", "target_types": ["AtamBankProbe"]},
+        "decision": {"kind": "single", "target_types": ["AtamAdaptiveDecision"]}
+      }
+    },
+
+    "AtamEvidence": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "citesDecision": {"kind": "single", "target_types": ["ArchitecturalDecision"]},
+        "citesComponent": {"kind": "single", "target_types": ["Component"]}
+      }
+    },
+
+    "Finding": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "scenario": {"kind": "single", "target_types": ["Scenario"]},
+        "approach": {"kind": "single", "target_types": ["ArchitecturalApproach"]},
+        "answeringQuestion": {"kind": "single", "target_types": ["ProbingQuestion"]},
+        "affects": {"kind": "many", "target_types": ["QualityAttribute"]},
+        "locus": {"kind": "many", "target_types": ["Component"]},
+        "evidence": {"kind": "many", "target_types": ["AtamEvidence"]},
+        "supersedes": {"kind": "single", "target_types": ["Finding"]}
+      }
+    },
+
+    "RiskTheme": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "members": {"kind": "many", "target_types": ["Finding"]},
+        "threatens": {"kind": "many", "target_types": ["BusinessDriver"]}
+      }
+    },
+
+    "Recommendation": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "addresses": {"kind": "single", "target_types": ["RiskTheme"]}
+      }
+    },
+
+    "PhaseGate": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "prevGate": {"chain_predecessor": true, "kind": "single", "target_types": ["PhaseGate"]}
+      }
+    },
+
+    "AtamReport": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "supersedes": {"kind": "single", "target_types": ["AtamReport"]}
+      }
+    },
+
+    "AtamInstrumentVersion": {
+      "links": {
+        "supersedes": {"kind": "single", "target_types": ["AtamInstrumentVersion"]}
+      }
+    },
+
+    "AtamBankProbe": {
+      "links": {
+        "instrumentVersion": {"kind": "single", "target_types": ["AtamInstrumentVersion"]},
+        "targetsQA": {"kind": "single", "target_types": ["QualityAttribute"]},
+        "prerequisites": {"kind": "many", "target_types": ["AtamBankProbe"]}
+      }
+    },
+
+    "AtamHypothesis": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "scenario": {"kind": "single", "target_types": ["Scenario"]},
+        "parentHypothesis": {"kind": "single", "target_types": ["AtamHypothesis"]},
+        "supports": {"kind": "many", "target_types": ["AtamEvidence"]},
+        "refutes": {"kind": "many", "target_types": ["AtamEvidence"]}
+      }
+    },
+
+    "AtamHypothesisUpdate": {
+      "links": {
+        "hypothesis": {"kind": "single", "target_types": ["AtamHypothesis"]},
+        "prevUpdate": {"kind": "single", "target_types": ["AtamHypothesisUpdate"]},
+        "evidence": {"kind": "many", "target_types": ["AtamEvidence", "Finding"]}
+      }
+    },
+
+    "AtamCoverage": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "scenario": {"kind": "single", "target_types": ["Scenario"]},
+        "previous": {"kind": "single", "target_types": ["AtamCoverage"]},
+        "decision": {"kind": "single", "target_types": ["AtamAdaptiveDecision"]}
+      }
+    },
+
+    "AtamPlan": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]}
+      }
+    },
+
+    "AtamAdaptiveDecision": {
+      "links": {
+        "plan": {"kind": "single", "target_types": ["AtamPlan"]},
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "bankProbe": {"kind": "single", "target_types": ["AtamBankProbe"]},
+        "discriminatesHypothesis": {"kind": "single", "target_types": ["AtamHypothesis"]}
+      }
+    },
+
+    "AtamProbeCandidate": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "plan": {"kind": "single", "target_types": ["AtamPlan"]},
+        "becomesQuestion": {"kind": "single", "target_types": ["ProbingQuestion"]}
+      }
+    },
+
+    "AtamProbeCritique": {
+      "links": {
+        "candidate": {"kind": "single", "target_types": ["AtamProbeCandidate"]},
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]}
+      }
+    },
+
+    "AtamProbeOutcome": {
+      "links": {
+        "evaluation": {"kind": "single", "target_types": ["AtamEvaluation"]},
+        "question": {"kind": "single", "target_types": ["ProbingQuestion"]},
+        "bankProbe": {"kind": "single", "target_types": ["AtamBankProbe"]},
+        "findings": {"kind": "many", "target_types": ["Finding"]}
+      }
+    }
+  }
+}
