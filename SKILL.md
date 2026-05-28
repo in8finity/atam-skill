@@ -413,3 +413,53 @@ It **warns and proceeds** (does not refuse) — but a clean run should show `unc
 - **Themes (P9) are rolled up from the *post-challenge* finding set.** Run challenge first; theme membership uses the revised severities and superseding records.
 - **(B2) The abductive "working-as-designed" CQ is a default theme-time step, not optional.** Every R-high finding should face `comparison_with_alternatives` (CQ13) before it becomes a theme member. ATAM resists a verdict; an un-challenged risk lean is itself a bias. The `challenge` verb auto-includes `abductive` for high-severity R findings.
 - **(B4) Run a finding-interaction pass before P9 rollup.** Before theming, ask "do any findings share a root cause?" Cross-link related findings (a long-running job that causes both a perf runaway *and* invisible data stranding is one root, two symptoms). The risk-theme step then clusters by shared cause, not just by surface QA.
+
+---
+
+## Running under pm (guided / assisted / auto execution)
+
+This skill is drivable by the `pm-*-skill-execution` family (`pm-guided-skill-execution`, `pm-assisted-skill-execution`, `pm-auto-skill-execution`). Those drivers call `pm extract-steps atam-evaluation`, which reads the `### Phase N — …` headings under **"Workflow — 9 ATAM phases with gates"** as the canonical step list, then plan one task per phase (chained by `dependsOn`) and execute them under the chosen policy. Invoke, e.g.:
+
+```
+pm-guided-skill-execution --skill atam-evaluation --prompt "ATAM of <system> at <scope>"
+pm-assisted-skill-execution --skill atam-evaluation --prompt "..."
+pm-auto-skill-execution --skill atam-evaluation --prompt "..."     # only for well-scoped, low-stakes runs
+```
+
+### Canonical steps (what the extractor will plan)
+
+The nine `### Phase N` headings (P0–P9) plus the §11 challenge sub-step. The extractor's anchors are those heading lines verbatim. Expect ~10 planned tasks for a full run; fewer if the run is endpoint-scoped (see scope note below).
+
+### Per-gate policy table
+
+For each phase gate, the **default decision** is what `auto` picks and what `assisted` picks for routine gates. **Critical** gates pause-and-ask the user *even in assisted and auto* — `auto` should **reject** the task rather than guess; `assisted` pauses, asks, then continues. Never auto-reject a step merely because a decision is required — surface it.
+
+| Phase / gate | Default decision (auto / assisted-routine) | Critical? | Precondition |
+|---|---|---|---|
+| **P0 Setup** | Inventory inputs (`fd`/`rg` for docs, ADRs, code), record scope. | **CRITICAL** — the system-under-evaluation and its boundaries cannot be guessed. Confirm scope with the user. | A target system/path is identified. |
+| **P1 Present ATAM** | Proceed (one-paragraph method summary). | no | — |
+| **P2 Business drivers** | **No default.** Drivers must come from the user/stakeholders. | **CRITICAL** — house rule: *never fabricate business drivers.* If the user can't supply them, mark `STATUS: stakeholder input needed` and pause. | P0 done. |
+| **P3 Architecture** | Summarize from docs + code inspection. | no (but flag if architecture cannot be derived from available inputs) | P2 done. |
+| **P4 Approaches** | Name approaches/tactics from `references/architectural-approaches.md`. | no | P3 done. |
+| **P5 Utility tree** | Build leaves; rate (Importance, Difficulty); default-select all (H,H)+(H,M) for analysis. | **CRITICAL** — which leaves to analyze is a prioritization judgment; confirm the selected set with the user. | P2 + at least one scenario per top-3 QA. |
+| **P6 Analyze** | Drive the bank loop (`next-probe`→record-question→record-finding→update-coverage) to closure; or manual-mode record-finding if the bank is empty. | no | P5 selected leaves exist. |
+| **§11 Challenge** | Challenge **every** high/med R/TP/SP finding (`cli.py challenge`). | **CRITICAL** — never auto-waive a challenge; the abductive "working-as-designed" CQ is mandatory for high-R findings. | At least one high/med finding. |
+| **P7 Brainstorm** | Generate use/growth/exploratory scenarios; self-vote if solo. **Auto-skip for endpoint/module scope.** | no | P6 done. |
+| **P8 Re-analyze** | Bank loop against the top-voted P7 scenarios. **Auto-skip if P7 skipped.** | no | P7 done. |
+| **P9 Themes + report** | Cluster findings into themes (post-challenge set), map to drivers, write recommendations, render `REPORT.md`. | no — but `close-phase --phase 9` runs the **challenge gate** (loud warning on unchallenged high/med findings); treat a non-empty `unchallenged_findings` list as a pause-and-ask in guided/assisted. | P8 (or P6 if P7/P8 skipped) done; §11 challenges recorded. |
+
+### Never-auto rules (hold in every mode, including `auto`)
+
+1. **Don't fabricate business drivers** (P2). No driver → pause, even in `auto`.
+2. **Don't auto-waive a challenge** (§11). Every high/med finding gets a real CQ pass; record the marker.
+3. **Don't auto-skip the abductive / "working-as-designed" CQ** for high-R findings (B2).
+4. **Don't render a verdict.** ATAM surfaces risks; it does not grade the architecture.
+5. **Don't write artifacts into the target repo's VCS** without asking (A10) — default to the evaluator's workspace or a git-ignored path.
+
+### Scope note
+
+Pass the scope in the prompt (`… at endpoint scope` / `… at subsystem scope`) and to `open-evaluation --goal-scope`. For **endpoint** or **module** scope, P7 and P8 carry the documented default **skip** (no brainstorm/re-analysis pass) — the driver plans them but they auto-close as `skipped` with a recorded note. For **subsystem** scope they run normally.
+
+### What a driver should record at each step
+
+Each phase task's report (`pm report`) should cite the hashharness shas it created (PhaseGate, plus the phase's records) so the planning-queue audit trail and the hashharness evaluation chain stay cross-referenced. The `close-phase` gate_sha is the natural proof-of-work artifact for `pm finished`.
