@@ -30,7 +30,9 @@ Collect in Phase 0 (Setup), in this priority order:
 
 ## Outputs
 
-All artifacts written to `./atam-evaluation/` in the target project, one file per phase plus a consolidated report:
+**(A10) Output location.** By default, write phase artifacts to `./atam-evaluation/` **in the directory where the skill is run** (the evaluator's workspace), NOT into the target repo's root — a new top-level `atam-evaluation/` there would land in the target's next commit. If you must write inside the target repo, put artifacts under a git-ignored path (e.g. alongside `.claude/`), or honor an explicit `--out <dir>`. State the chosen location before writing, and never add the directory to the target's VCS without asking. The hashharness chain is the source of truth; the files are a rendered convenience.
+
+All artifacts go in one directory, one file per phase plus a consolidated report:
 
 ```
 atam-evaluation/
@@ -127,6 +129,8 @@ Each phase: **(a)** do the work, **(b)** write the artifact, **(c)** show the us
   - **Sensitivity point** — a property of one or more components critical to achieving a particular quality-attribute response
   - **Tradeoff point** — a sensitivity point that affects **more than one** quality attribute, often in opposing directions
 - **Cite evidence.** Every risk/sensitivity/tradeoff must reference a specific file, ADR, scenario, or stated decision. No findings from thin air.
+- **(B1) Consequence findings need hard evidence.** Before rating an `R`/`TP` finding `high` or `med`, check the Phase-0 measurement sources (perf logs, incident reports, test results) — not only structural reasoning. `record-finding` warns when a high/med R/TP cites no evidence of kind `measurement | incident | test_result`. A structural argument alone is weaker than a high severity implies; either find the measurement or lower the severity.
+- **(B3) Gates check claim precision, not just artifact completeness.** When approving a phase gate, don't just confirm the artifact exists — confirm each finding cites the *exact* mechanism, verified in code. A plausible-but-wrong mechanism ("iOS-only because silent-push returns early" when the real cause is a HealthKit-only data source) can pass a completeness check and reach the report. Ask: "is this mechanism the one in the code, or the one that sounds right?"
 - **Don't invent business drivers.** If the user can't supply them, mark the artifact `STATUS: stakeholder input needed` and stop — do not fabricate goals.
 - **Don't grade the architecture.** ATAM finds risks; it doesn't score "good/bad". Resist the urge to render a verdict.
 
@@ -193,10 +197,25 @@ WP="atam.case.<system>-$(date +%s)"
 $PY scripts/cli.py open-evaluation --workpackage "$WP" \
     --system "checkout-svc" --evaluator "AI+lead-architect" \
     --instrument-version atam-v1 \
+    --goal-scope subsystem \
     --goal-target-qas performance,availability,security
-# → evaluation_sha, p0_gate_sha
+# → evaluation_sha, p0_gate_sha, bank_probe_count, warnings[]
+#   (warns if the bank has 0 probes — Mode B would be a no-op; use manual mode)
 
-# Per Phase-6/8 tick:
+# Build the ontology (A3: create-* verbs — no more raw create_item):
+$PY scripts/cli.py create-qa --workpackage "$WP" --evaluation-sha <SHA> \
+    --name performance --priority-rank 1                       # → qa_sha
+$PY scripts/cli.py create-component --workpackage "$WP" --evaluation-sha <SHA> \
+    --name api-gateway --kind component --responsibility "..." # → component_sha
+$PY scripts/cli.py create-scenario --workpackage "$WP" --evaluation-sha <SHA> \
+    --title "p99 search ≤ 300ms" --qa performance --qa-sha <SHA> \
+    --importance H --difficulty M --artifact-shas c1,c2        # → scenario_sha (+rating_sha)
+$PY scripts/cli.py create-risk-theme --workpackage "$WP" --evaluation-sha <SHA> \
+    --title "..." --member-shas f1,f2 --threatens-shas d1      # → theme_sha
+$PY scripts/cli.py create-recommendation --workpackage "$WP" --evaluation-sha <SHA> \
+    --title "..." --addresses-theme-sha <SHA> --effort S       # → recommendation_sha
+
+# Per Phase-6/8 tick (Mode B, bank-driven):
 $PY scripts/cli.py next-probe --workpackage "$WP" --phase 6
 # → chosen_probe, source, plan_sha, decision_sha
 # Then: ask the question. Capture the answer.
@@ -242,6 +261,22 @@ $PY scripts/cli.py close-phase --workpackage "$WP" --phase 6 \
 ```
 
 All verbs print `{"ok": true, ...}` JSON. Chain shas across calls. Failures return `{"ok": false, "error": "..."}` and exit 1.
+
+### (A4) Manual mode — record findings without the tick chain
+
+`record-question`, `record-finding`, and `update-coverage` all accept omitted `--decision-sha`/`--question-sha`; when absent they **auto-mint** the `AtamPlan` + `AtamAdaptiveDecision` (+ `ProbingQuestion`) stubs. So when the bank is empty or you're doing a direct code-walk (no adaptive selection), record a finding in one call:
+
+```bash
+$PY scripts/cli.py record-finding --workpackage "$WP" \
+    --evaluation-sha <SHA> --scenario-sha <SHA> \
+    --finding-type R --severity med \
+    --title "..." --description "..." --affects-qa-shas qa1 \
+    --evidence "file_ref:bot/src/x.py:42:the quoted line" \
+    --evidence "measurement:perf-log 2026-05:p99 1.4s"
+# → finding_sha, auto-minted question_sha + decision_sha, inline evidence_shas, warnings[]
+```
+
+`--evidence kind:pointer:quote` (repeatable) creates the `AtamEvidence` inline — no separate `record-evidence` call needed. The minimal manual chain is just `create-scenario` + `create-qa` once, then one `record-finding` per finding.
 
 ### Detection
 
@@ -290,13 +325,9 @@ A separate, optional, but **strongly recommended** sub-phase between the close o
 
 ### What this step uses
 
-Integrates with the **`aif-arguments` skill**, which:
-- Builds an AIF argument graph from a Finding's claim + evidence + inference structure
-- Identifies the Walton argumentation scheme(s) the Finding invokes (catalog in `references/cq-schemes.md`)
-- Generates the scheme's canonical CQs as `IndividualCriticalQuestion` nodes
-- Records the exchange as I-nodes (claims), RA-nodes (inference steps), CA-nodes (conflicts/attacks), PA-nodes (preferences) — all in the same hashharness store as the ATAM records
+The `cli.py challenge` verb is self-contained: it detects the Finding's argumentation scheme(s), emits the scheme's CQs (catalog in `references/cq-schemes.md`), and **writes a challenge marker** — an `AtamEvidence` record (`kind=quote`) carrying `attributes.challenged_finding_sha`. That marker is what the P9 gate (below) looks for, so simply running `challenge` on a finding satisfies the gate even if the finding ends up standing pat.
 
-So a challenge exchange becomes queryable from both sides: as ATAM Findings with `supersedes` links, and as an AIF argument graph.
+For contested reasoning that warrants an explicit argument graph, hand off to the **`aif-arguments` skill**, which records the exchange as I-nodes (claims), RA-nodes (inference steps), CA-nodes (conflicts/attacks), PA-nodes (preferences) in the same hashharness store. (Note: there is no `IndividualCriticalQuestion` type — a CQ becomes an `AifInode` + an `AifCA` against the finding's `AifRA`.) A challenge exchange is then queryable from both sides: as ATAM Findings with `supersedes` links, and as an AIF argument graph.
 
 ### Process
 
@@ -342,17 +373,30 @@ For each Finding F (high/med severity):
 $PY scripts/cli.py challenge --workpackage "$WP" \
     --finding-sha <SHA> \
     [--scheme cause_to_effect|sign|evidence_to_hypothesis|precedent|abductive|negative_consequences|practical_reasoning] \
-    [--from-aif-graph <I_NODE_SHA>]
-# → returns the CQ list and an `aif_graph_sha` for the constructed argument graph.
+    [--tier-only A B C] \
+    [--no-marker]
+# → returns scheme(s) detected, the tiered CQ list, evidence summaries,
+#   and a challenge_marker_sha (the AtamEvidence the P9 gate detects).
 ```
 
 The `challenge` verb:
-- Delegates argument-graph construction to `aif-arguments` (via Skill invocation or MCP)
-- Returns the CQ list with tiered priorities (A/B/C based on the scheme and the finding's structure)
-- After the human/LLM exchange, records each productive CQ as an `AtamEvidence` (kind=`quote`) pointing at the AIF graph for the full conversation
-- If a revision is committed, the `supersedes` Finding links its `promotion_reason` to the AIF graph sha for provenance
+- Detects the Finding's argumentation scheme(s) from its shape (causal language, past-incident citations, sibling references, severity) — override with `--scheme`.
+- Returns the CQ list with tiered priorities (A/B/C); `--tier-only A` keeps the exchange brisk.
+- **Writes a challenge marker** (`AtamEvidence`, `kind=quote`, `attributes.challenged_finding_sha=<SHA>`) so the P9 gate can tell the finding was challenged even if it stands pat. Pass `--no-marker` for a read-only CQ preview.
+- After the exchange: revise via `record-finding --supersedes` (downgrade severity / reframe causality), or let the finding stand (the marker already satisfies the gate).
 
 See `references/cq-schemes.md` for the full Walton catalog (7 schemes, ~24 canonical CQs) and tiering heuristics.
+
+### P9 challenge gate (loud warning)
+
+`close-phase --phase 9` inspects every **current** (non-superseded) Finding of type `R`/`TP`/`SP` at severity `high`/`med` and reports any that have neither a `supersedes` revision nor a challenge marker:
+
+```json
+{"ok": true, "gate_sha": "...", "unchallenged_findings": [{"sha": "...", "title": "...", "severity": "high", "type": "R"}],
+ "warnings": ["§11 CHALLENGE GATE: 2 high/med finding(s) reach P9 with no recorded CQ challenge ..."]}
+```
+
+It **warns and proceeds** (does not refuse) — but a clean run should show `unchallenged_findings: []`. Run `challenge` on each listed finding before relying on the report.
 
 ### When to skip
 
@@ -367,3 +411,5 @@ See `references/cq-schemes.md` for the full Walton catalog (7 schemes, ~24 canon
 - **Tier A or skip.** Don't perform a procedural CQ pass that ticks all 24 questions without engagement; that's bureaucracy, not challenge.
 - **Recommendation splits are common.** `practical_reasoning` CQs (`other_means`, `side_effects`) frequently surface a cheaper "do-now" companion to a heavier "do-later" recommendation. The audit chain accommodates both via separate `Recommendation` records.
 - **Themes (P9) are rolled up from the *post-challenge* finding set.** Run challenge first; theme membership uses the revised severities and superseding records.
+- **(B2) The abductive "working-as-designed" CQ is a default theme-time step, not optional.** Every R-high finding should face `comparison_with_alternatives` (CQ13) before it becomes a theme member. ATAM resists a verdict; an un-challenged risk lean is itself a bias. The `challenge` verb auto-includes `abductive` for high-severity R findings.
+- **(B4) Run a finding-interaction pass before P9 rollup.** Before theming, ask "do any findings share a root cause?" Cross-link related findings (a long-running job that causes both a perf runaway *and* invisible data stranding is one root, two symptoms). The risk-theme step then clusters by shared cause, not just by surface QA.

@@ -97,6 +97,74 @@ def _split_csv(s: str) -> list[str]:
     return [x.strip() for x in s.split(",") if x.strip()]
 
 
+def _count_bank_probes(adapter, instrument_version: str) -> int:
+    refdata_wp = f"atam.refdata.{instrument_version}"
+    return len(
+        adapter.find_items(type="AtamBankProbe", work_package_id=refdata_wp, limit=500)
+    )
+
+
+def _ensure_decision(adapter, wp: str, eval_sha: str) -> str:
+    """Auto-mint a minimal AtamPlan + AtamAdaptiveDecision for manual-mode recording.
+    Returns the decision record_sha256. (A4: removes the hidden next-probe ordering
+    contract — record-* verbs can stand alone.)"""
+    plans = adapter.find_items(type="AtamPlan", work_package_id=wp, limit=500)
+    n = len(plans) + 1
+    plan_sha = adapter.create_item(ItemSpec(
+        type="AtamPlan", work_package_id=wp, title=f"Plan #{n} (manual)",
+        text=f"atam.plan:{wp}.p{n}",
+        attributes={"candidate_probes": [], "generated_at": _now_iso(), "mode": "manual"},
+        links={"evaluation": eval_sha},
+    ))
+    dec_sha = adapter.create_item(ItemSpec(
+        type="AtamAdaptiveDecision", work_package_id=wp, title=f"Decision #{n} (manual)",
+        text=f"atam.decision:{wp}.d{n}",
+        attributes={"chosen_probe": None, "source": "manual",
+                    "reason": "manual-mode record (auto-minted stub)", "decided_at": _now_iso()},
+        links={"plan": plan_sha, "evaluation": eval_sha},
+    ))
+    return dec_sha
+
+
+def _ensure_question(adapter, wp: str, eval_sha: str, scenario_sha: str,
+                     decision_sha: str, target_qa: str = "",
+                     probe_id: str = "manual.record") -> str:
+    """Auto-mint a ProbingQuestion stub for manual-mode finding recording."""
+    questions = adapter.find_items(type="ProbingQuestion", work_package_id=wp, limit=500)
+    n = len(questions) + 1
+    return adapter.create_item(ItemSpec(
+        type="ProbingQuestion", work_package_id=wp, title=f"Q{n}: {probe_id}",
+        text=f"atam.question:{wp}.q{n}",
+        attributes={"probe_id": probe_id,
+                    "text": "(manual-mode finding; no explicit probe deployed)",
+                    "target_qa": target_qa, "probe_kind": "manual", "asked_at": _now_iso()},
+        links={"evaluation": eval_sha, "scenario": scenario_sha, "decision": decision_sha},
+    ))
+
+
+def _create_evidence_inline(adapter, wp: str, eval_sha: str, spec_str: str) -> str:
+    """Parse a 'kind:pointer:quote' inline-evidence spec and create the AtamEvidence.
+    (A5: lets record-finding take evidence inline instead of pre-creating it.)
+    'kind' and 'pointer' are required; 'quote' (everything after the 2nd colon) optional."""
+    parts = spec_str.split(":", 2)
+    kind = parts[0].strip() if parts else "file_ref"
+    pointer = parts[1].strip() if len(parts) > 1 else spec_str
+    quote = parts[2].strip() if len(parts) > 2 else ""
+    evs = adapter.find_items(type="AtamEvidence", work_package_id=wp, limit=500)
+    n = len(evs) + 1
+    return adapter.create_item(ItemSpec(
+        type="AtamEvidence", work_package_id=wp, title=pointer[:60],
+        text=f"atam.evidence:{wp}.e{n}",
+        attributes={"kind": kind, "pointer": pointer, "quoted_text": quote,
+                    "recorded_at": _now_iso()},
+        links={"evaluation": eval_sha},
+    ))
+
+
+# Evidence kinds that satisfy the B1 "consequence findings need hard evidence" check
+_HARD_EVIDENCE_KINDS = {"measurement", "incident", "test_result"}
+
+
 # --------------------------------------------------------------------------- #
 # Verb handlers
 # --------------------------------------------------------------------------- #
@@ -123,7 +191,22 @@ def verb_open_evaluation(args) -> None:
     )
     gates = adapter.find_items(type="PhaseGate", work_package_id=args.workpackage)
     p0_sha = gates[0]["record_sha256"] if gates else None
-    _ok(evaluation_sha=eval_sha, p0_gate_sha=p0_sha, instrument_version_ref=iv_ref)
+
+    # A2: detection that "an AtamInstrumentVersion exists" passes structurally even
+    # when the bank has 0 probes. Count probes and warn if Mode B will be a no-op.
+    warnings = []
+    n_probes = _count_bank_probes(adapter, args.instrument_version)
+    if n_probes == 0:
+        warnings.append(
+            f"Bank '{args.instrument_version}' has 0 AtamBankProbe records — "
+            "Mode B adaptive selection will return closure on every tick. "
+            "You are effectively in manual-record mode (use record-finding directly; "
+            "it auto-mints the plan/decision/question stubs). Seed a probe bank or "
+            "pick an instrument-version that has probes."
+        )
+    _ok(evaluation_sha=eval_sha, p0_gate_sha=p0_sha,
+        instrument_version_ref=iv_ref, bank_probe_count=n_probes,
+        warnings=warnings)
 
 
 def verb_close_phase(args) -> None:
@@ -140,13 +223,58 @@ def verb_close_phase(args) -> None:
         mcp=adapter,
         evaluation_sha=eval_sha,
     )
+    warnings: list[str] = []
+    unchallenged: list[dict] = []
+
+    # A1: at the P8->P9 boundary, surface high/med findings that were never challenged.
+    # Loud warning (not refusal): print the list, let the close proceed.
+    if args.phase == 9:
+        findings = adapter.find_items(type="Finding", work_package_id=args.workpackage, limit=500)
+        # Current set = findings not superseded by a newer finding.
+        superseded = set()
+        for f in findings:
+            sup = (f.get("links") or {}).get("supersedes")
+            if sup:
+                superseded.add(sup)
+        # Challenge markers: AtamEvidence whose attributes.challenged_finding_sha names a finding.
+        markers = adapter.find_items(type="AtamEvidence", work_package_id=args.workpackage, limit=1000)
+        challenged_shas = set()
+        for m in markers:
+            cf = (m.get("attributes") or {}).get("challenged_finding_sha")
+            if cf:
+                challenged_shas.add(cf)
+        for f in findings:
+            sha = f["record_sha256"]
+            if sha in superseded:
+                continue  # not current
+            a = f.get("attributes", {})
+            if a.get("finding_type") not in ("R", "TP", "SP"):
+                continue
+            if a.get("severity") not in ("high", "med"):
+                continue
+            links = f.get("links") or {}
+            is_revision = bool(links.get("supersedes"))  # came from a challenge revision
+            is_marked = sha in challenged_shas
+            if not (is_revision or is_marked):
+                unchallenged.append({"sha": sha, "title": f.get("title", ""),
+                                     "severity": a.get("severity"), "type": a.get("finding_type")})
+        if unchallenged:
+            warnings.append(
+                f"§11 CHALLENGE GATE: {len(unchallenged)} high/med finding(s) reach P9 "
+                "with no recorded CQ challenge (no supersedes revision and no challenge "
+                "marker). ATAM resists a verdict — an unchallenged risk lean is itself a "
+                "bias. Run `cli.py challenge --finding-sha <sha>` on each, then either "
+                "supersede or attach a challenged-and-survived marker, before relying on "
+                "the report. Proceeding anyway (loud-warn mode)."
+            )
+
     gate_sha = controller.close_phase(
         phase=args.phase,
         decision=args.decision,
         note=args.note,
         prev_gate_sha=args.prev_gate_sha,
     )
-    _ok(gate_sha=gate_sha)
+    _ok(gate_sha=gate_sha, warnings=warnings, unchallenged_findings=unchallenged)
 
 
 def verb_state(args) -> None:
@@ -225,6 +353,10 @@ def verb_next_probe(args) -> None:
 
 def verb_record_question(args) -> None:
     adapter = HashharnessAdapter()
+    # A4: --decision-sha is optional; auto-mint a manual-mode plan+decision if absent.
+    decision_sha = args.decision_sha or _ensure_decision(
+        adapter, args.workpackage, args.evaluation_sha
+    )
     questions = adapter.find_items(
         type="ProbingQuestion", work_package_id=args.workpackage, limit=500
     )
@@ -246,7 +378,7 @@ def verb_record_question(args) -> None:
         links={
             "evaluation": args.evaluation_sha,
             "scenario": args.scenario_sha,
-            "decision": args.decision_sha,
+            "decision": decision_sha,
             **(
                 {"sourceBankProbe": args.source_bank_probe_sha}
                 if args.source_bank_probe_sha
@@ -255,7 +387,7 @@ def verb_record_question(args) -> None:
         },
     )
     q_sha = adapter.create_item(spec)
-    _ok(question_sha=q_sha, question_index=q_index)
+    _ok(question_sha=q_sha, question_index=q_index, decision_sha=decision_sha)
 
 
 def verb_record_evidence(args) -> None:
@@ -292,13 +424,52 @@ def verb_record_finding(args) -> None:
     qa_shas = _split_csv(args.affects_qa_shas)
     locus_shas = _split_csv(args.locus_shas) if args.locus_shas else []
 
+    # A5: inline evidence. Each --evidence 'kind:pointer:quote' becomes an AtamEvidence
+    # created here and linked, so a finding can be recorded in one call.
+    inline_kinds: list[str] = []
+    for spec_str in (args.evidence or []):
+        ev_sha = _create_evidence_inline(adapter, args.workpackage, args.evaluation_sha, spec_str)
+        ev_shas.append(ev_sha)
+        inline_kinds.append(spec_str.split(":", 1)[0].strip())
+
     if not ev_shas:
-        _err("record-finding requires --evidence-shas (≥1); quote-or-no-finding rule.")
+        _err("record-finding needs evidence: pass --evidence-shas and/or --evidence "
+             "kind:pointer:quote (≥1). Quote-or-no-finding rule.")
+
+    # A4: --question-sha optional; auto-mint a manual decision+question if absent.
+    question_sha = args.question_sha
+    decision_sha = None
+    if not question_sha:
+        decision_sha = _ensure_decision(adapter, args.workpackage, args.evaluation_sha)
+        question_sha = _ensure_question(
+            adapter, args.workpackage, args.evaluation_sha, args.scenario_sha,
+            decision_sha, target_qa=(qa_shas[0] if qa_shas else ""),
+        )
+
+    # B1: consequence-bearing findings at high/med severity should cite hard evidence
+    # (a measurement, incident, or test result), not only structural/file_ref reasoning.
+    warnings: list[str] = []
+    if args.finding_type in ("R", "TP") and args.severity in ("high", "med"):
+        kinds_present = set(inline_kinds)
+        # Inspect any pre-supplied evidence shas for their kind too.
+        if args.evidence_shas:
+            for ev_sha in _split_csv(args.evidence_shas):
+                ev = adapter.get_item_by_hash(ev_sha)
+                if ev:
+                    kinds_present.add(ev.get("attributes", {}).get("kind", ""))
+        if not (kinds_present & _HARD_EVIDENCE_KINDS):
+            warnings.append(
+                f"B1: {args.finding_type}/{args.severity} finding cites no hard evidence "
+                f"(measurement|incident|test_result) — only {sorted(kinds_present) or 'none'}. "
+                "Before rating a consequence-bearing finding, check the Phase-0 measurement "
+                "sources (perf logs, incident reports, test results). A structural argument "
+                "alone is weaker than the severity implies."
+            )
 
     links: dict = {
         "evaluation": args.evaluation_sha,
         "scenario": args.scenario_sha,
-        "answeringQuestion": args.question_sha,
+        "answeringQuestion": question_sha,
         "evidence": ev_shas,
         "affects": qa_shas,
     }
@@ -325,11 +496,17 @@ def verb_record_finding(args) -> None:
         links=links,
     )
     f_sha = adapter.create_item(spec)
-    _ok(finding_sha=f_sha, finding_type=args.finding_type)
+    _ok(finding_sha=f_sha, finding_type=args.finding_type,
+        evidence_shas=ev_shas, question_sha=question_sha,
+        decision_sha=decision_sha, warnings=warnings)
 
 
 def verb_update_coverage(args) -> None:
     adapter = HashharnessAdapter()
+    # A4: --decision-sha optional; auto-mint if absent.
+    decision_sha = args.decision_sha or _ensure_decision(
+        adapter, args.workpackage, args.evaluation_sha
+    )
     covs = adapter.find_items(type="AtamCoverage", work_package_id=args.workpackage, limit=1000)
     n = len(covs) + 1
     # Find prior for this scenario
@@ -340,7 +517,7 @@ def verb_update_coverage(args) -> None:
     links: dict = {
         "evaluation": args.evaluation_sha,
         "scenario": args.scenario_sha,
-        "decision": args.decision_sha,
+        "decision": decision_sha,
     }
     if prior_sha:
         links["previous"] = prior_sha
@@ -360,7 +537,122 @@ def verb_update_coverage(args) -> None:
         links=links,
     )
     cov_sha = adapter.create_item(spec)
-    _ok(coverage_sha=cov_sha)
+    _ok(coverage_sha=cov_sha, decision_sha=decision_sha)
+
+
+# --------------------------------------------------------------------------- #
+# A3: create-* verbs for the rest of the ATAM ontology (QA, component, scenario,
+# risk-theme, recommendation). Thin wrappers so the whole graph is reachable from
+# one CLI with consistent JSON output, instead of dropping to raw create_item.
+# --------------------------------------------------------------------------- #
+
+
+def verb_create_qa(args) -> None:
+    adapter = HashharnessAdapter()
+    spec = ItemSpec(
+        type="QualityAttribute", work_package_id=args.workpackage,
+        title=args.name,
+        text=f"atam.qa:{args.workpackage}.{args.name}",
+        attributes={"priority_rank": args.priority_rank,
+                    "refinements": _split_csv(args.refinements) if args.refinements else []},
+        links={"evaluation": args.evaluation_sha,
+               **({"motivatedBy": _split_csv(args.motivated_by)} if args.motivated_by else {})},
+    )
+    _ok(qa_sha=adapter.create_item(spec), title=args.name)
+
+
+def verb_create_component(args) -> None:
+    adapter = HashharnessAdapter()
+    comps = adapter.find_items(type="Component", work_package_id=args.workpackage, limit=500)
+    n = len(comps) + 1
+    spec = ItemSpec(
+        type="Component", work_package_id=args.workpackage,
+        title=args.name,
+        text=f"atam.component:{args.workpackage}.{args.name}",
+        attributes={"kind": args.kind, "responsibility": args.responsibility},
+        links={"evaluation": args.evaluation_sha,
+               **({"partOf": args.part_of} if args.part_of else {})},
+    )
+    _ok(component_sha=adapter.create_item(spec), title=args.name)
+
+
+def verb_create_scenario(args) -> None:
+    adapter = HashharnessAdapter()
+    scens = adapter.find_items(type="Scenario", work_package_id=args.workpackage, limit=500)
+    n = len(scens) + 1
+    links: dict = {"evaluation": args.evaluation_sha}
+    if args.qa_sha:
+        links["qualityAttribute"] = args.qa_sha
+    if args.artifact_shas:
+        links["stimulatesArtifact"] = _split_csv(args.artifact_shas)
+    if args.supersedes:
+        links["supersedes"] = args.supersedes
+    spec = ItemSpec(
+        type="Scenario", work_package_id=args.workpackage,
+        title=args.title,
+        text=f"atam.scenario:{args.workpackage}.s{n}",
+        attributes={"qa": args.qa, "category": args.category,
+                    "source": args.source, "stimulus": args.stimulus,
+                    "environment": args.environment, "artifact_label": args.artifact_label,
+                    "response": args.response, "response_measure": args.response_measure,
+                    "phase_introduced": args.phase_introduced},
+        links=links,
+    )
+    scenario_sha = adapter.create_item(spec)
+    out = {"scenario_sha": scenario_sha}
+    # Inline rating (the selector needs selected_for_analysis + I/D to consider a scenario).
+    if args.importance or args.difficulty:
+        ratings = adapter.find_items(type="ScenarioRating", work_package_id=args.workpackage, limit=1000)
+        rn = len(ratings) + 1
+        rating_sha = adapter.create_item(ItemSpec(
+            type="ScenarioRating", work_package_id=args.workpackage,
+            title=f"Rating s{n} ({args.importance},{args.difficulty})",
+            text=f"atam.rating:{args.workpackage}.s{n}-r1",
+            attributes={"importance": args.importance or "M", "difficulty": args.difficulty or "M",
+                        "selected_for_analysis": not args.not_selected,
+                        "rationale": args.rating_rationale, "phase": args.phase_introduced},
+            links={"scenario": scenario_sha},
+        ))
+        out["rating_sha"] = rating_sha
+    _ok(**out)
+
+
+def verb_create_risk_theme(args) -> None:
+    adapter = HashharnessAdapter()
+    themes = adapter.find_items(type="RiskTheme", work_package_id=args.workpackage, limit=500)
+    n = len(themes) + 1
+    links: dict = {"evaluation": args.evaluation_sha}
+    if args.member_shas:
+        links["members"] = _split_csv(args.member_shas)
+    if args.threatens_shas:
+        links["threatens"] = _split_csv(args.threatens_shas)
+    spec = ItemSpec(
+        type="RiskTheme", work_package_id=args.workpackage,
+        title=args.title,
+        text=f"atam.theme:{args.workpackage}.t{n}",
+        attributes={"description": args.description, "severity": args.severity,
+                    "rank": args.rank, "phase": "P9"},
+        links=links,
+    )
+    _ok(theme_sha=adapter.create_item(spec), title=args.title)
+
+
+def verb_create_recommendation(args) -> None:
+    adapter = HashharnessAdapter()
+    recs = adapter.find_items(type="Recommendation", work_package_id=args.workpackage, limit=500)
+    n = len(recs) + 1
+    links: dict = {"evaluation": args.evaluation_sha}
+    if args.addresses_theme_sha:
+        links["addresses"] = args.addresses_theme_sha
+    spec = ItemSpec(
+        type="Recommendation", work_package_id=args.workpackage,
+        title=args.title,
+        text=f"atam.recommendation:{args.workpackage}.r{n}",
+        attributes={"description": args.description, "effort": args.effort,
+                    "owner_role": args.owner_role, "priority": args.priority, "phase": "P9"},
+        links=links,
+    )
+    _ok(recommendation_sha=adapter.create_item(spec), title=args.title)
 
 
 def verb_open_hypothesis(args) -> None:
@@ -514,6 +806,30 @@ def verb_challenge(args) -> None:
                 "quoted_text_snippet": (ev.get("attributes", {}).get("quoted_text", "") or "")[:200],
             })
 
+    # A1: write a challenge marker so the P9 gate can tell this finding WAS challenged
+    # (even if it ends up standing pat with no supersedes revision). The marker is an
+    # AtamEvidence whose attributes.challenged_finding_sha names the target.
+    marker_sha = None
+    if not args.no_marker:
+        eval_items = adapter.find_items(type="AtamEvaluation", work_package_id=args.workpackage)
+        eval_sha = eval_items[0]["record_sha256"] if eval_items else None
+        markers = adapter.find_items(type="AtamEvidence", work_package_id=args.workpackage, limit=1000)
+        mn = len(markers) + 1
+        marker_sha = adapter.create_item(ItemSpec(
+            type="AtamEvidence", work_package_id=args.workpackage,
+            title=f"cq-challenge: {target.get('title','')[:48]}",
+            text=f"atam.evidence:{args.workpackage}.cq-marker-{mn}",
+            attributes={"kind": "quote",
+                        "pointer": f"cq-challenge-marker:{args.finding_sha}",
+                        "challenged_finding_sha": args.finding_sha,
+                        "schemes": schemes,
+                        "quoted_text": "Challenge initiated; CQs emitted for operator/LLM to answer. "
+                                       "Revise via record-finding --supersedes, or let the finding stand "
+                                       "(this marker records that it was challenged).",
+                        "recorded_at": _now_iso()},
+            links={"evaluation": eval_sha} if eval_sha else {},
+        ))
+
     _ok(
         record_type=rec_type,
         target_sha=args.finding_sha,
@@ -524,11 +840,12 @@ def verb_challenge(args) -> None:
         evidence_count=len(evidence_summaries),
         evidence_summaries=evidence_summaries,
         critical_questions=cqs,
+        challenge_marker_sha=marker_sha,
         next_step=(
-            "Hand off to aif-arguments skill: pass the target, schemes, and CQ list. "
-            "aif-arguments builds I/RA/CA/PA nodes for the exchange. "
-            "After the exchange, use 'record-finding --supersedes' for revisions, "
-            "or attach a 'challenged-and-survived' AtamEvidence (kind=quote) if the Finding stands."
+            "Answer the Tier-A CQs. For productive critiques, use 'record-finding --supersedes' "
+            "to revise (downgrade severity / reframe causality). If the finding stands, this "
+            "challenge marker already records that it was challenged (satisfies the P9 gate). "
+            "Optionally hand off to aif-arguments to build I/RA/CA/PA nodes for the exchange."
         ),
     )
 
@@ -606,7 +923,7 @@ def _make_parser() -> argparse.ArgumentParser:
     p_rq = sub.add_parser("record-question")
     _common(p_rq)
     p_rq.add_argument("--evaluation-sha", required=True)
-    p_rq.add_argument("--decision-sha", required=True)
+    p_rq.add_argument("--decision-sha", default="", help="Optional; auto-minted if omitted (manual mode).")
     p_rq.add_argument("--scenario-sha", required=True)
     p_rq.add_argument("--probe-id", required=True)
     p_rq.add_argument("--probe-text", required=True)
@@ -630,13 +947,14 @@ def _make_parser() -> argparse.ArgumentParser:
     p_rf = sub.add_parser("record-finding")
     _common(p_rf)
     p_rf.add_argument("--evaluation-sha", required=True)
-    p_rf.add_argument("--question-sha", required=True)
+    p_rf.add_argument("--question-sha", default="", help="Optional; auto-mints a manual decision+question stub if omitted (A4).")
     p_rf.add_argument("--scenario-sha", required=True)
     p_rf.add_argument("--approach-sha", default="")
     p_rf.add_argument("--finding-type", required=True, choices=["R", "NR", "SP", "TP"])
     p_rf.add_argument("--title", required=True)
     p_rf.add_argument("--description", required=True)
-    p_rf.add_argument("--evidence-shas", required=True)
+    p_rf.add_argument("--evidence-shas", default="", help="Comma-sep pre-created AtamEvidence shas.")
+    p_rf.add_argument("--evidence", action="append", default=[], help="Inline evidence 'kind:pointer:quote', repeatable (A5). Created and linked in this call.")
     p_rf.add_argument("--affects-qa-shas", required=True)
     p_rf.add_argument("--locus-shas", default="")
     p_rf.add_argument("--phase", type=int, default=6)
@@ -649,7 +967,7 @@ def _make_parser() -> argparse.ArgumentParser:
     _common(p_uc)
     p_uc.add_argument("--evaluation-sha", required=True)
     p_uc.add_argument("--scenario-sha", required=True)
-    p_uc.add_argument("--decision-sha", required=True)
+    p_uc.add_argument("--decision-sha", default="", help="Optional; auto-minted if omitted (manual mode).")
     p_uc.add_argument("--status", required=True, choices=["untouched", "in-progress", "sufficient", "saturated"])
     p_uc.add_argument("--saturation", type=float, required=True)
     p_uc.add_argument("--gaps", default="")
@@ -672,7 +990,72 @@ def _make_parser() -> argparse.ArgumentParser:
     p_ch.add_argument("--finding-sha", required=True, help="Finding or Recommendation record_sha256 to challenge")
     p_ch.add_argument("--scheme", default="", choices=["", "negative_consequences", "cause_to_effect", "sign", "evidence_to_hypothesis", "abductive", "precedent", "practical_reasoning"], help="Override automatic scheme detection")
     p_ch.add_argument("--tier-only", nargs="+", default=[], choices=["A", "B", "C"], help="Filter CQs by tier (default: all)")
+    p_ch.add_argument("--no-marker", action="store_true", help="Don't write the challenge marker (read-only CQ preview).")
     p_ch.set_defaults(fn=verb_challenge)
+
+    # --- A3: create-* verbs for the rest of the ontology ---
+    p_cq = sub.add_parser("create-qa")
+    _common(p_cq)
+    p_cq.add_argument("--evaluation-sha", required=True)
+    p_cq.add_argument("--name", required=True, help="Canonical QA name (performance, security, ...)")
+    p_cq.add_argument("--priority-rank", type=int, default=99)
+    p_cq.add_argument("--refinements", default="")
+    p_cq.add_argument("--motivated-by", default="", help="Comma-sep BusinessDriver shas")
+    p_cq.set_defaults(fn=verb_create_qa)
+
+    p_cc = sub.add_parser("create-component")
+    _common(p_cc)
+    p_cc.add_argument("--evaluation-sha", required=True)
+    p_cc.add_argument("--name", required=True)
+    p_cc.add_argument("--kind", default="component", choices=["component", "connector", "deployment-unit", "data-store", "external-dependency", "trust-boundary", "bounded-context"])
+    p_cc.add_argument("--responsibility", default="")
+    p_cc.add_argument("--part-of", default="", help="Parent Component sha")
+    p_cc.set_defaults(fn=verb_create_component)
+
+    p_cs = sub.add_parser("create-scenario")
+    _common(p_cs)
+    p_cs.add_argument("--evaluation-sha", required=True)
+    p_cs.add_argument("--title", required=True)
+    p_cs.add_argument("--qa", required=True, help="QA name string stamped on the scenario")
+    p_cs.add_argument("--qa-sha", default="", help="QualityAttribute record sha to link")
+    p_cs.add_argument("--category", default="anticipated", choices=["anticipated", "use", "growth", "exploratory"])
+    p_cs.add_argument("--source", default="")
+    p_cs.add_argument("--stimulus", default="")
+    p_cs.add_argument("--environment", default="")
+    p_cs.add_argument("--artifact-label", default="")
+    p_cs.add_argument("--artifact-shas", default="", help="Comma-sep Component shas (stimulatesArtifact)")
+    p_cs.add_argument("--response", default="")
+    p_cs.add_argument("--response-measure", default="")
+    p_cs.add_argument("--phase-introduced", default="P5")
+    p_cs.add_argument("--supersedes", default="")
+    # inline rating
+    p_cs.add_argument("--importance", default="", choices=["", "H", "M", "L"])
+    p_cs.add_argument("--difficulty", default="", choices=["", "H", "M", "L"])
+    p_cs.add_argument("--not-selected", action="store_true", help="Mark selected_for_analysis=false")
+    p_cs.add_argument("--rating-rationale", default="")
+    p_cs.set_defaults(fn=verb_create_scenario)
+
+    p_crt = sub.add_parser("create-risk-theme")
+    _common(p_crt)
+    p_crt.add_argument("--evaluation-sha", required=True)
+    p_crt.add_argument("--title", required=True)
+    p_crt.add_argument("--description", default="")
+    p_crt.add_argument("--severity", default="med", choices=["high", "med", "low"])
+    p_crt.add_argument("--rank", type=int, default=99)
+    p_crt.add_argument("--member-shas", default="", help="Comma-sep Finding shas")
+    p_crt.add_argument("--threatens-shas", default="", help="Comma-sep BusinessDriver shas")
+    p_crt.set_defaults(fn=verb_create_risk_theme)
+
+    p_crr = sub.add_parser("create-recommendation")
+    _common(p_crr)
+    p_crr.add_argument("--evaluation-sha", required=True)
+    p_crr.add_argument("--title", required=True)
+    p_crr.add_argument("--description", default="")
+    p_crr.add_argument("--effort", default="M", help="S | M | L | S-M etc.")
+    p_crr.add_argument("--owner-role", default="")
+    p_crr.add_argument("--priority", type=int, default=99)
+    p_crr.add_argument("--addresses-theme-sha", default="")
+    p_crr.set_defaults(fn=verb_create_recommendation)
 
     p_uh = sub.add_parser("update-hypothesis")
     _common(p_uh)

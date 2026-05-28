@@ -2,7 +2,9 @@
 
 Maps Walton argumentation schemes to the kinds of reasoning ATAM Findings, RiskThemes, and Recommendations commonly invoke. Each scheme comes with its canonical critical-questions (CQs); each CQ is a probe that, if answered productively, can revise or withdraw the original argument.
 
-Used by the **challenge step** (see SKILL.md §11) and consumable by the `aif-arguments` skill: each scheme name here is also an AIF `argumentation_scheme` value; each CQ becomes an `IndividualCriticalQuestion` node when the challenge is recorded.
+Used by the **challenge step** (see SKILL.md §11) and consumable by the `aif-arguments` skill: each scheme name here is also an AIF `argumentation_scheme` value.
+
+> **Recording note.** There is no `IndividualCriticalQuestion` hashharness type. The challenge step records its work two ways: (1) the `cli.py challenge` verb writes a lightweight **`AtamEvidence`** record (`kind=quote`) with `attributes.challenged_finding_sha` naming the target — this is the marker the P9 gate looks for; (2) if you hand off to `aif-arguments` for a full argument graph, each CQ becomes an `AifInode` (the question as a claim) plus an `AifCA` (the conflict/attack against the finding's `AifRA` inference node). Use the lightweight path by default; reach for the AIF graph when the reasoning is contested enough to warrant explicit premise/conclusion/attacker modeling.
 
 ## How to use this doc
 
