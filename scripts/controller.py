@@ -107,7 +107,9 @@ class AtamController:
 
     def load_bank(self) -> list[BankProbe]:
         refdata_wp = f"atam.refdata.{self.instrument_version_id}"
-        records = self.mcp.find_items(type="AtamBankProbe", work_package_id=refdata_wp)
+        # §1: get_work_package returns the full bank unbounded; find_items
+        # capped at 50 by default and silently truncated for larger banks.
+        records = self.mcp.get_work_package(refdata_wp, type="AtamBankProbe")
         bank: list[BankProbe] = []
         for r in records:
             a = r["attributes"]
@@ -139,11 +141,17 @@ class AtamController:
             raise RuntimeError("open_evaluation() must be called before state()")
         wp = self.evaluation_workpackage
 
-        # Scenarios
-        scenario_records = self.mcp.find_items(type="Scenario", work_package_id=wp, limit=500)
-        rating_records = self.mcp.find_items(
-            type="ScenarioRating", work_package_id=wp, limit=1000
-        )
+        # §5 (perf-integration 2026-05-30): load the whole evaluation wp once,
+        # partition in memory. Replaces 6+ per-type round trips with one.
+        # Also fixes §1 silent-truncation (the old find_items limits could be
+        # crossed quietly on long-running evaluations).
+        all_items = self.mcp.get_work_package(wp)
+        by_type: dict[str, list[dict]] = {}
+        for it in all_items:
+            by_type.setdefault(it.get("type", ""), []).append(it)
+
+        scenario_records = by_type.get("Scenario", [])
+        rating_records = by_type.get("ScenarioRating", [])
         # Latest rating per scenario_sha — sort by created_at asc so last-write-wins gives newest
         rating_records.sort(key=lambda r: r.get("created_at", ""))
         latest_rating: dict[str, dict] = {}
@@ -171,7 +179,7 @@ class AtamController:
             )
 
         # Coverage: latest AtamCoverage per scenario — sort asc so last-write-wins is newest
-        cov_records = self.mcp.find_items(type="AtamCoverage", work_package_id=wp, limit=1000)
+        cov_records = by_type.get("AtamCoverage", [])
         cov_records.sort(key=lambda c: c.get("created_at", ""))
         latest_cov: dict[str, dict] = {}
         for c in cov_records:
@@ -199,10 +207,8 @@ class AtamController:
             )
 
         # Hypotheses (open) — sort updates asc so last-write-wins is the newest status
-        hyp_records = self.mcp.find_items(type="AtamHypothesis", work_package_id=wp, limit=200)
-        update_records = self.mcp.find_items(
-            type="AtamHypothesisUpdate", work_package_id=wp, limit=1000
-        )
+        hyp_records = by_type.get("AtamHypothesis", [])
+        update_records = by_type.get("AtamHypothesisUpdate", [])
         update_records.sort(key=lambda u: u.get("created_at", ""))
         latest_status_by_hyp: dict[str, str] = {}
         for u in update_records:
@@ -228,15 +234,21 @@ class AtamController:
             )
 
         # Deployed probes (from ProbingQuestion records)
-        q_records = self.mcp.find_items(type="ProbingQuestion", work_package_id=wp, limit=500)
+        q_records = by_type.get("ProbingQuestion", [])
         deployed: set[str] = set()
         for q in q_records:
             pid = q["attributes"].get("probe_id")
             if pid:
                 deployed.add(pid)
 
-        # Evaluation goal
-        eval_rec = self.mcp.get_item_by_hash(self.evaluation_sha)
+        # Evaluation goal — AtamEvaluation is already in by_type if the eval is open
+        eval_recs = by_type.get("AtamEvaluation", [])
+        eval_rec = next(
+            (r for r in eval_recs if r.get("record_sha256") == self.evaluation_sha),
+            None,
+        )
+        if eval_rec is None:
+            eval_rec = self.mcp.get_item_by_hash(self.evaluation_sha)
         g = (eval_rec or {}).get("attributes", {}).get("goal", {})
         goal = EvaluationGoal(
             primary=g.get("primary", "find-tradeoffs-and-risks"),

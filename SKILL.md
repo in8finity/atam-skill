@@ -27,6 +27,8 @@ Collect in Phase 0 (Setup), in this priority order:
 2. **Source code** — top-level layout, module boundaries, key dependencies
 3. **External requirements doc** — ask user for path if not obvious
 4. **Interactive stakeholder input** — business drivers, priorities, constraints (always required; the user *is* the stakeholder proxy unless they name others)
+5. **(A1) Measurement evidence** — perf logs, incident reports, benchmarks, a `feedback/` dir, CI timing data, recent perf-tagged commits (`git log --grep -i 'perf\\|slow\\|timeout\\|latency'`). If no measurement evidence exists for a QA that will be rated `high`/`med`, record `STATUS: no measurement evidence for <QA>` in the P0 artifact so the gap is visible at Phase 2, not discovered post-hoc when an incident surfaces. Doc-reading reasons your way to "this should be fast"; only measurement reasons you to "189s `pm status`". For Performance/Scalability/Availability QAs, structural reasoning alone is weaker than the severity implies (see B1 + P9 §A5 gate).
+6. **(A6) Documented-vs-observed diff** — when arch docs (or a README) make a property claim ("O(1) head lookup", "constant-time lookup", "horizontally scalable"), explicitly check that claim against incidents, tests, or a quick code-trace before propagating it into Phase 4 approaches. The README is the architect's *claim*; the incident report is what *actually happened*. ATAM should privilege the latter when they conflict.
 
 ## Outputs
 
@@ -90,6 +92,7 @@ Each phase: **(a)** do the work, **(b)** write the artifact, **(c)** show the us
 - Use `templates/utility-tree.md` and `references/quality-attributes.md`
 - Write `04-utility-tree.md`
 - **Gate:** user prioritizes leaves; agree on which (H,H) and (H,M) leaves to analyze
+- **(A2) Per-QA coverage floor:** require **at least one selected scenario per top-level QA**, regardless of (I,D) rating. The (H,H)/(H,M) cut is a useful default, but a whole QA falling below it is a decision the user should make explicitly, not a mechanical side effect. `close-phase --phase 5` warns when any QA has zero selected scenarios — these are exactly the QAs that "the one you rate low-importance is the one a latent measured problem will blindside you on" applies to. Either add a leaf or explicitly waive it in the P5 artifact.
 
 ### Phase 6 — Analyze architectural approaches
 - For each high-priority leaf from Phase 5:
@@ -97,6 +100,8 @@ Each phase: **(a)** do the work, **(b)** write the artifact, **(c)** show the us
   - Identify the architectural approach(es) addressing it
   - Probe with quality-attribute-specific questions (see `references/probing-questions.md`)
   - Record **risks, non-risks, sensitivity points, tradeoff points**
+- **(A4) Run a probe for Performance / Scalability / Availability leaves.** ATAM-as-written is doc-reading + code-reading; that's fine for structural QAs but **insufficient for measured ones** — you cannot read your way to "189s" or "collapses at 6 workers." For any analyzed Perf/Scale/Avail leaf, *write a minimal probe* (a 10-line load script, a `time` invocation, a benchmark) and capture the output as `AtamEvidence kind=measurement`. If the user declines, record the finding's evidence as `structural-only` so the P9 gate can flag it (A5).
+- **(A3) Challenge load-bearing non-risks.** A wrong-but-plausible NR ("O(1) fast path", "constant time", "cheap operation") is invisible to every gate that filters on R/TP. When a Phase-4 approach or Phase-6 NR asserts a *property* the analysis leans on, set `--asserts-property` on `record-finding`. The P9 gate then requires the assertion to be challenged like an R/TP — and `record-finding` warns immediately at record-time so the requirement isn't deferred to report time.
 - Use `templates/analysis.md`
 - Write `05-analysis.md`
 - **Gate:** review findings; user may add probes
@@ -118,7 +123,13 @@ Each phase: **(a)** do the work, **(b)** write the artifact, **(c)** show the us
 - Map themes back to business drivers (which goal does each threaten?)
 - Produce actionable **recommendations**
 - Write `08-risk-themes.md` and `REPORT.md`
-- **Gate:** final review with user
+- **Gate:** final review with user.
+- **`close-phase --phase 9` runs four loud-warning checks** (none refuse — they print and proceed):
+  1. **§11 challenge gate** — every current high/med R/TP/SP finding must have either a `supersedes` revision or an `AtamEvidence` challenge marker.
+  2. **(A3) NR-challenge gate** — every NR with `asserts_property=true` must also be challenged.
+  3. **(A5) Structural-only gate** — every current high/med R/TP must cite evidence of kind `measurement | incident | test_result`. Pure `file_ref`/`quote`/`doc` evidence is weaker than the severity implies for measured QAs (see B1 + A1).
+  4. A non-empty `qas_zero_selected` list from P5 should already be resolved by P9 (gate proceeds either way).
+- Use `cli.py audit --workpackage <wp>` for a one-shot trustworthiness report combining cryptographic + structural checks.
 
 ## House rules
 
@@ -258,6 +269,20 @@ $PY scripts/cli.py update-hypothesis --workpackage "$WP" \
 # Close phase gate:
 $PY scripts/cli.py close-phase --workpackage "$WP" --phase 6 \
     --decision approved --prev-gate-sha <SHA> --note "Top-priority leaves analyzed."
+
+# --- Portfolio & audit verbs (perf-integration 2026-05-30) ---
+
+# Audit one evaluation: crypto + structural checks combined.
+$PY scripts/cli.py audit --workpackage "$WP"
+# → trustworthy=true iff: crypto.ok AND no unchallenged R/TP/SP AND no
+#   structural-only consequence findings AND no asserting NRs unchallenged
+#   AND no QAs with zero selected scenarios.
+
+# Portfolio view across all evaluations in the store:
+$PY scripts/cli.py list-evaluations --with-status
+# → every atam.case.* wp + its latest PhaseGate (phase/decision/at)
+$PY scripts/cli.py portfolio-status --phase 8 --decision approved
+# → which evaluations are sitting on an approved P8 (ready for P9 themes)
 ```
 
 All verbs print `{"ok": true, ...}` JSON. Chain shas across calls. Failures return `{"ok": false, "error": "..."}` and exit 1.

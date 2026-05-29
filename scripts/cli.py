@@ -225,21 +225,56 @@ def verb_close_phase(args) -> None:
     )
     warnings: list[str] = []
     unchallenged: list[dict] = []
+    structural_only: list[dict] = []
+    asserting_nrs_unchallenged: list[dict] = []
+    qas_zero_selected: list[str] = []
+
+    # A2 (perf-miss feedback): at the P5 boundary, surface QAs with 0 selected
+    # scenarios — an entire QA falling below the analysis cut by I/D math is a
+    # decision the user should make explicitly, not a mechanical side effect.
+    if args.phase == 5:
+        qas = adapter.get_work_package(args.workpackage, type="QualityAttribute")
+        scenarios = adapter.get_work_package(args.workpackage, type="Scenario")
+        ratings = adapter.get_work_package(args.workpackage, type="ScenarioRating")
+        ratings.sort(key=lambda r: r.get("created_at", ""))
+        latest_rating: dict[str, dict] = {}
+        for r in ratings:
+            sc = (r.get("links") or {}).get("scenario")
+            if sc:
+                latest_rating[sc] = r
+        qa_selected: dict[str, int] = {q["title"]: 0 for q in qas}
+        for s in scenarios:
+            qa_name = s.get("attributes", {}).get("qa", "")
+            r = latest_rating.get(s["record_sha256"], {})
+            if r.get("attributes", {}).get("selected_for_analysis"):
+                qa_selected[qa_name] = qa_selected.get(qa_name, 0) + 1
+        qas_zero_selected = sorted([n for n, c in qa_selected.items() if c == 0])
+        if qas_zero_selected:
+            warnings.append(
+                f"A2: QAs with ZERO selected scenarios: {qas_zero_selected}. "
+                "ATAM's I/D math has structurally buried these QAs — the one you "
+                "rate low-importance is exactly the one a latent measured problem "
+                "will blindside you on. Either add at least one leaf per QA "
+                "(per-QA coverage floor), or explicitly waive in the report."
+            )
 
     # A1: at the P8->P9 boundary, surface high/med findings that were never challenged.
     # Loud warning (not refusal): print the list, let the close proceed.
     if args.phase == 9:
-        findings = adapter.find_items(type="Finding", work_package_id=args.workpackage, limit=500)
+        findings = adapter.get_work_package(args.workpackage, type="Finding")
         # Current set = findings not superseded by a newer finding.
         superseded = set()
         for f in findings:
             sup = (f.get("links") or {}).get("supersedes")
             if sup:
                 superseded.add(sup)
-        # Challenge markers: AtamEvidence whose attributes.challenged_finding_sha names a finding.
-        markers = adapter.find_items(type="AtamEvidence", work_package_id=args.workpackage, limit=1000)
+        # Pre-fetch all evidence once: builds {sha: kind} for fast structural-only
+        # checks and {challenged_finding_sha} for the challenge-marker check.
+        markers = adapter.get_work_package(args.workpackage, type="AtamEvidence")
         challenged_shas = set()
+        ev_kind: dict[str, str] = {}
         for m in markers:
+            ev_kind[m["record_sha256"]] = m.get("attributes", {}).get("kind", "")
             cf = (m.get("attributes") or {}).get("challenged_finding_sha")
             if cf:
                 challenged_shas.add(cf)
@@ -268,13 +303,228 @@ def verb_close_phase(args) -> None:
                 "the report. Proceeding anyway (loud-warn mode)."
             )
 
+        # A3: NRs claiming a load-bearing property (asserts_property=true) must also
+        # be challenged — a wrong "fast-path/O(1)/cheap" non-risk is the dangerous class.
+        for f in findings:
+            sha = f["record_sha256"]
+            if sha in superseded:
+                continue
+            a = f.get("attributes", {})
+            if a.get("finding_type") != "NR":
+                continue
+            if not a.get("asserts_property"):
+                continue
+            links = f.get("links") or {}
+            is_revision = bool(links.get("supersedes"))
+            is_marked = sha in challenged_shas
+            if not (is_revision or is_marked):
+                asserting_nrs_unchallenged.append({
+                    "sha": sha, "title": f.get("title", ""), "type": "NR",
+                })
+        if asserting_nrs_unchallenged:
+            warnings.append(
+                f"A3 NR-CHALLENGE GATE: {len(asserting_nrs_unchallenged)} non-risk "
+                "finding(s) marked --asserts-property reach P9 unchallenged. The most "
+                "dangerous errors are the things waved through as fine. Run challenge "
+                "on each and verify the asserted property is the one in the code, not "
+                "the one that sounds right."
+            )
+
+        # A5: surface high/med R/TP findings whose evidence is structural-only
+        # (no measurement|incident|test_result). B1 fires at record-time as a print;
+        # this is the gate at report-time so the warning isn't absorbed as a caveat.
+        for f in findings:
+            sha = f["record_sha256"]
+            if sha in superseded:
+                continue
+            a = f.get("attributes", {})
+            if a.get("finding_type") not in ("R", "TP"):
+                continue
+            if a.get("severity") not in ("high", "med"):
+                continue
+            links = f.get("links") or {}
+            kinds = {ev_kind.get(s, "") for s in (links.get("evidence", []) or [])}
+            if not (kinds & _HARD_EVIDENCE_KINDS):
+                structural_only.append({
+                    "sha": sha, "title": f.get("title", ""),
+                    "severity": a.get("severity"), "type": a.get("finding_type"),
+                    "kinds_present": sorted(k for k in kinds if k),
+                })
+        if structural_only:
+            warnings.append(
+                f"A5 STRUCTURAL-ONLY GATE: {len(structural_only)} ≥med R/TP finding(s) "
+                "rest on structural evidence only (no measurement|incident|test_result). "
+                "For Performance / Scalability / Availability claims, you cannot read your "
+                "way to '189s' or 'collapses at 6 workers' — either run a probe, attach "
+                "an incident, or lower the severity. Proceeding anyway (loud-warn mode)."
+            )
+
     gate_sha = controller.close_phase(
         phase=args.phase,
         decision=args.decision,
         note=args.note,
         prev_gate_sha=args.prev_gate_sha,
     )
-    _ok(gate_sha=gate_sha, warnings=warnings, unchallenged_findings=unchallenged)
+    _ok(gate_sha=gate_sha, warnings=warnings,
+        unchallenged_findings=unchallenged,
+        structural_only_findings=structural_only,
+        asserting_nrs_unchallenged=asserting_nrs_unchallenged,
+        qas_zero_selected=qas_zero_selected)
+
+
+def verb_audit(args) -> None:
+    """§2 (perf-integration): cryptographically + structurally audit a whole evaluation.
+
+    Verifies every record in the wp (verify_work_package when available;
+    per-item rehydrate as fallback) AND surfaces P9-gate-style structural
+    issues: high/med findings with no challenge marker, structural-only
+    consequence findings, QAs with zero analyzed scenarios.
+    """
+    adapter = HashharnessAdapter()
+    wp = args.workpackage
+
+    crypto = adapter.verify_work_package(wp, summary=args.summary)
+
+    # Structural sub-audit: re-use the same checks the P9 gate runs.
+    findings = adapter.get_work_package(wp, type="Finding")
+    superseded = set()
+    for f in findings:
+        sup = (f.get("links") or {}).get("supersedes")
+        if sup:
+            superseded.add(sup)
+    markers = adapter.get_work_package(wp, type="AtamEvidence")
+    challenged_shas = {
+        m["attributes"].get("challenged_finding_sha")
+        for m in markers if m.get("attributes", {}).get("challenged_finding_sha")
+    }
+    # Pre-fetch ALL evidence in the wp once (markers list above already has them
+    # but built only the challenged_finding_sha map). Build sha → kind for fast
+    # structural-only checks — avoids O(N_findings × total_records) get_item_by_hash.
+    ev_kind: dict[str, str] = {
+        m["record_sha256"]: m.get("attributes", {}).get("kind", "")
+        for m in markers
+    }
+    unchallenged: list[dict] = []
+    structural_only: list[dict] = []
+    asserting_unchallenged: list[dict] = []
+    for f in findings:
+        sha = f["record_sha256"]
+        if sha in superseded:
+            continue
+        a = f.get("attributes", {})
+        ft = a.get("finding_type", "")
+        sev = a.get("severity", "")
+        links = f.get("links") or {}
+        is_revision = bool(links.get("supersedes"))
+        is_marked = sha in challenged_shas
+        # A1 unchallenged high/med R/TP/SP
+        if ft in ("R", "TP", "SP") and sev in ("high", "med") and not (is_revision or is_marked):
+            unchallenged.append({"sha": sha, "title": f.get("title", ""), "type": ft, "severity": sev})
+        # A3 unchallenged NR with asserts_property
+        if ft == "NR" and a.get("asserts_property") and not (is_revision or is_marked):
+            asserting_unchallenged.append({"sha": sha, "title": f.get("title", "")})
+        # A5 structural-only high/med consequence findings
+        if ft in ("R", "TP") and sev in ("high", "med"):
+            ev_shas = links.get("evidence", []) or []
+            kinds = {ev_kind.get(s, "") for s in ev_shas}
+            if not (kinds & _HARD_EVIDENCE_KINDS):
+                structural_only.append({
+                    "sha": sha, "title": f.get("title", ""),
+                    "severity": sev, "type": ft,
+                    "kinds_present": sorted(k for k in kinds if k),
+                })
+
+    # A2 QAs with 0 selected scenarios.
+    qas = adapter.get_work_package(wp, type="QualityAttribute")
+    scenarios = adapter.get_work_package(wp, type="Scenario")
+    ratings = adapter.get_work_package(wp, type="ScenarioRating")
+    ratings.sort(key=lambda r: r.get("created_at", ""))
+    latest_rating: dict[str, dict] = {}
+    for r in ratings:
+        sc = (r.get("links") or {}).get("scenario")
+        if sc:
+            latest_rating[sc] = r
+    qa_selected_count: dict[str, int] = {q["title"]: 0 for q in qas}
+    for s in scenarios:
+        sa = s.get("attributes", {})
+        qa_name = sa.get("qa", "")
+        r = latest_rating.get(s["record_sha256"], {})
+        if r.get("attributes", {}).get("selected_for_analysis"):
+            qa_selected_count[qa_name] = qa_selected_count.get(qa_name, 0) + 1
+    qas_zero_selected = sorted([n for n, c in qa_selected_count.items() if c == 0])
+
+    _ok(
+        work_package_id=wp,
+        crypto=crypto,
+        structural={
+            "unchallenged_findings": unchallenged,
+            "structural_only_findings": structural_only,
+            "asserting_nrs_unchallenged": asserting_unchallenged,
+            "qas_with_zero_selected_scenarios": qas_zero_selected,
+        },
+        trustworthy=(
+            crypto.get("ok") and not unchallenged and not structural_only
+            and not asserting_unchallenged and not qas_zero_selected
+        ),
+    )
+
+
+def verb_list_evaluations(args) -> None:
+    """§3 (perf-integration): portfolio enumeration.
+
+    Lists work-packages matching the prefix (default `atam.case.`) and, for
+    each, the latest PhaseGate (phase + decision) so you can see at a glance
+    which evaluations are blocked / approved at which phase.
+    """
+    adapter = HashharnessAdapter()
+    prefix = args.prefix
+    wps = adapter.list_work_packages(prefix=prefix)
+    out_evals = []
+    if args.with_status and wps:
+        tips = adapter.find_tips_where(type="PhaseGate")
+        for wp in wps:
+            t = tips.get(wp)
+            a = (t or {}).get("attributes", {})
+            out_evals.append({
+                "work_package_id": wp,
+                "latest_phase": a.get("phase"),
+                "latest_decision": a.get("decision"),
+                "gate_sha": (t or {}).get("record_sha256"),
+            })
+    else:
+        out_evals = [{"work_package_id": wp} for wp in wps]
+    _ok(prefix=prefix, count=len(wps), evaluations=out_evals)
+
+
+def verb_portfolio_status(args) -> None:
+    """§4 (perf-integration): show evaluations at a given (phase, decision).
+
+    Default: every evaluation sitting on an approved PhaseGate. Filter further
+    with --phase / --decision. Uses find_tips_where when the indexed primitive
+    is available; falls back to client-side grouping otherwise.
+    """
+    adapter = HashharnessAdapter()
+    where: dict = {}
+    if args.phase is not None:
+        where["phase"] = args.phase
+    if args.decision:
+        where["decision"] = args.decision
+    tips = adapter.find_tips_where(type="PhaseGate", where_attributes=where or None)
+    rows = []
+    prefix = args.prefix
+    for wp, tip in sorted(tips.items()):
+        if prefix and not wp.startswith(prefix):
+            continue
+        a = tip.get("attributes", {})
+        rows.append({
+            "work_package_id": wp,
+            "phase": a.get("phase"),
+            "decision": a.get("decision"),
+            "at": a.get("at"),
+            "gate_sha": tip.get("record_sha256"),
+            "note": a.get("note", "")[:80],
+        })
+    _ok(filter=where, count=len(rows), rows=rows)
 
 
 def verb_state(args) -> None:
@@ -491,11 +741,20 @@ def verb_record_finding(args) -> None:
             "phase": args.phase,
             "severity": args.severity,
             "promotion_reason": args.promotion_reason,
+            "asserts_property": bool(args.asserts_property),
             "recorded_at": _now_iso(),
         },
         links=links,
     )
     f_sha = adapter.create_item(spec)
+    # A3: NR findings asserting a load-bearing property must also be challenged
+    # — surface the requirement at record time so it's not invisible at P9.
+    if args.finding_type == "NR" and args.asserts_property:
+        warnings.append(
+            "A3: NR with --asserts-property must be challenged before P9 "
+            "(a 'fast-path / O(1) / cheap' claim that turns out to be wrong is the "
+            "most dangerous class of error). Run `cli.py challenge --finding-sha <sha>`."
+        )
     _ok(finding_sha=f_sha, finding_type=args.finding_type,
         evidence_shas=ev_shas, question_sha=question_sha,
         decision_sha=decision_sha, warnings=warnings)
@@ -1016,6 +1275,10 @@ def _make_parser() -> argparse.ArgumentParser:
     p_rf.add_argument("--severity", default="med", choices=["high", "med", "low"])
     p_rf.add_argument("--promotion-reason", default="")
     p_rf.add_argument("--supersedes", default="")
+    p_rf.add_argument("--asserts-property", action="store_true",
+                      help="A3: flag a finding (esp. an NR) that makes a load-bearing "
+                           "claim (e.g. 'O(1) fast path', 'cheap operation') so the P9 "
+                           "gate requires it to be challenged like an R/TP.")
     p_rf.set_defaults(fn=verb_record_finding)
 
     p_uc = sub.add_parser("update-coverage")
@@ -1111,6 +1374,40 @@ def _make_parser() -> argparse.ArgumentParser:
     p_crr.add_argument("--priority", type=int, default=99)
     p_crr.add_argument("--addresses-theme-sha", default="")
     p_crr.set_defaults(fn=verb_create_recommendation)
+
+    p_au = sub.add_parser("audit",
+        help="§2: cryptographic + structural audit of one evaluation. "
+             "Reports crypto integrity (verify_work_package), unchallenged "
+             "high/med findings, structural-only severities, asserting NRs, "
+             "and QAs with zero selected scenarios. trustworthy=true iff all "
+             "checks pass.")
+    _common(p_au)
+    p_au.add_argument("--summary", action="store_true", default=True,
+                      help="Truncate error list to first 10 (default).")
+    p_au.add_argument("--full", dest="summary", action="store_false",
+                      help="Return all errors, no truncation.")
+    p_au.set_defaults(fn=verb_audit)
+
+    p_le = sub.add_parser("list-evaluations",
+        help="§3: enumerate evaluations (work-packages with prefix `atam.case.`). "
+             "Use --with-status to include each evaluation's latest PhaseGate.")
+    p_le.add_argument("--prefix", default="atam.case.",
+                      help="Work-package prefix (default: atam.case.). "
+                           "Use 'atam.refdata.' to enumerate probe-bank versions.")
+    p_le.add_argument("--with-status", action="store_true",
+                      help="Include latest PhaseGate per evaluation.")
+    p_le.set_defaults(fn=verb_list_evaluations)
+
+    p_ps = sub.add_parser("portfolio-status",
+        help="§4: which evaluations are at a given (phase, decision). Default "
+             "(no filter) shows every evaluation's latest gate. Pass --phase 8 "
+             "--decision approved to find runs ready for P9 themes.")
+    p_ps.add_argument("--phase", type=int, default=None)
+    p_ps.add_argument("--decision", default="",
+                      choices=["", "approved", "revised", "skipped"])
+    p_ps.add_argument("--prefix", default="atam.case.",
+                      help="Filter to work-packages with this prefix.")
+    p_ps.set_defaults(fn=verb_portfolio_status)
 
     p_uh = sub.add_parser("update-hypothesis")
     _common(p_uh)

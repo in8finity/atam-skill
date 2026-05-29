@@ -59,6 +59,112 @@ class McpAdapter(ABC):
     @abstractmethod
     def get_item_by_hash(self, record_sha256: str) -> dict[str, Any] | None: ...
 
+    # --- hashharness perf-integration §1: unbounded per-(wp, type) fetch.
+    # Replaces find_items(type=T, wp=W, limit=N) which silently truncates at N
+    # on long-running evaluations. Subclasses MUST return every matching record.
+    @abstractmethod
+    def get_work_package(
+        self,
+        work_package_id: str,
+        type: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    # --- §3: portfolio enumeration. Default impl is a fallback that scans
+    # AtamEvaluation records and dedups workpackage ids; concrete adapters
+    # should override with list_work_packages when the primitive is available.
+    def list_work_packages(self, prefix: str | None = None) -> list[str]:
+        # Fallback: enumerate via AtamEvaluation records.
+        evals = self.find_items(type="AtamEvaluation", limit=10000)
+        wps: set[str] = set()
+        for it in evals:
+            wp = it.get("work_package_id", "")
+            if wp and (prefix is None or wp.startswith(prefix)):
+                wps.add(wp)
+        return sorted(wps)
+
+    # --- §4: tip-by-attribute query. Fallback walks the full PhaseGate (or other
+    # chain_predecessor type) set and filters client-side; concrete adapters
+    # should override with find_tips_where when available.
+    def find_tips_where(
+        self,
+        type: str,
+        where_attributes: dict[str, Any] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Return {work_package_id: tip_record} where the tip's attributes match
+        all entries of where_attributes (str==str equality)."""
+        all_items = self.find_items(type=type, limit=10000)
+        by_wp: dict[str, dict[str, Any]] = {}
+        for it in all_items:
+            wp = it.get("work_package_id", "")
+            if not wp:
+                continue
+            # last-write-wins by created_at; this is a fallback, not indexed
+            prev = by_wp.get(wp)
+            if prev is None or it.get("created_at", "") > prev.get("created_at", ""):
+                by_wp[wp] = it
+        if not where_attributes:
+            return by_wp
+        out: dict[str, dict[str, Any]] = {}
+        for wp, tip in by_wp.items():
+            a = tip.get("attributes", {})
+            if all(str(a.get(k)) == str(v) for k, v in where_attributes.items()):
+                out[wp] = tip
+        return out
+
+    # --- §2: cryptographic audit of a whole work package. Fallback uses the
+    # existing per-item verification path; override with verify_work_package
+    # when the primitive ships.
+    def verify_work_package(
+        self,
+        work_package_id: str,
+        summary: bool = True,
+    ) -> dict[str, Any]:
+        """Structural audit (NOT cryptographic): every record present, every link
+        target reachable. Fast because it loads the wp ONCE and resolves
+        intra-wp links from an in-memory map. Cross-wp link targets are looked
+        up only if not in the wp — at most once per unique sha.
+
+        This is the fallback when upstream `verify_work_package` isn't installed.
+        It catches missing records, dangling intra-wp links, and obvious
+        corruption — but does NOT re-verify each record's hash binding or schema
+        binding the way the upstream primitive does. Document the gap to callers.
+        """
+        items = self.get_work_package(work_package_id)
+        in_wp: set[str] = {it["record_sha256"] for it in items if it.get("record_sha256")}
+        errors: list[dict[str, Any]] = []
+        external_seen: dict[str, bool] = {}  # sha → present?
+        for it in items:
+            sha = it.get("record_sha256")
+            if not sha:
+                errors.append({"text": it.get("text", ""), "error": "missing record_sha256"})
+                continue
+            for role, val in (it.get("links") or {}).items():
+                if role.endswith("Hash") and role[:-4] in (it.get("links") or {}):
+                    continue  # digest companion, not a record ref
+                targets = val if isinstance(val, list) else [val] if isinstance(val, str) else []
+                for t in targets:
+                    if not t:
+                        continue
+                    if t in in_wp:
+                        continue
+                    if t not in external_seen:
+                        external_seen[t] = self.get_item_by_hash(t) is not None
+                    if not external_seen[t]:
+                        errors.append({"sha": sha, "link_role": role, "missing_target": t,
+                                       "text": it.get("text", "")})
+        return {
+            "work_package_id": work_package_id,
+            "ok": not errors,
+            "checked_items": len(items),
+            "errors_count": len(errors),
+            "errors": (errors[:10] if summary else errors),
+            "verifier": (
+                "atam-adapter-fallback (structural only — every record present and "
+                "every link target reachable; does NOT replay hash/schema bindings — "
+                "upstream verify_work_package not yet installed)"
+            ),
+        }
+
 
 class FakeAdapter(McpAdapter):
     """In-memory substitute for tests."""
@@ -108,3 +214,17 @@ class FakeAdapter(McpAdapter):
 
     def get_item_by_hash(self, record_sha256: str) -> dict[str, Any] | None:
         return self._records_by_record_sha.get(record_sha256)
+
+    def get_work_package(
+        self,
+        work_package_id: str,
+        type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for rec in self._records_by_record_sha.values():
+            if rec["work_package_id"] != work_package_id:
+                continue
+            if type is not None and rec["type"] != type:
+                continue
+            out.append(rec)
+        return out

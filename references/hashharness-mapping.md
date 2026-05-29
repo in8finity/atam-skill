@@ -237,8 +237,23 @@ Case-local. Status transitions. Append-only chain via `prevUpdate`.
 - **Evidence chain behind a recommendation:**
   recommendation → theme → member findings → evidence (→ component / decision).
 
-- **Verify the chain is intact:**
-  `verify_chain` on the evaluation's `work_package_id`.
+- **Audit the whole evaluation (every record, not just root-reachable):**
+  ```text
+  mcp__hashharness__verify_work_package(work_package_id="atam.case.<slug>", summary=true)
+  # → {work_package_id, ok, checked_items, errors_count}
+  ```
+  This is the correct primitive for an evaluation audit. The earlier "`verify_chain` on the wp" recipe was misleading: `verify_chain` follows reachable nodes from a single text-sha root, and an ATAM evaluation has many records that no single root reaches (`PhaseGate` is a chain but doesn't link to every Finding/Evidence/Scenario). `verify_work_package` re-checks every record's hash/schema binding regardless of reachability — exactly what catches a tampered or orphan record that *isn't* on the PhaseGate spine.
+
+  Combine with the structural §11 challenge check and the A5 structural-only check via `cli.py audit --workpackage <wp>` — one command, end-to-end trustworthiness verdict.
+
+- **Portfolio enumeration (across evaluations):**
+  ```text
+  mcp__hashharness__list_work_packages(prefix="atam.case.")
+  # → {work_package_ids: [...]}
+  ```
+  Plus `find_tips_where(type="PhaseGate", where_attributes={"phase":"8","decision":"approved"})` to ask "which evaluations are ready for P9 themes." The skill's `cli.py list-evaluations` / `portfolio-status` verbs wrap these.
+
+  **Per-scenario / per-hypothesis state is NOT indexed by `find_tips_where`** and intentionally so. `ScenarioRating.replaces`, `AtamCoverage.previous`, and `AtamHypothesisUpdate.prevUpdate` are per-scenario / per-hypothesis timelines, not per-`(wp, type)` chains — the schema deliberately does NOT use `chain_predecessor: true` here, because `chain_predecessor` is a single-head constraint that would conflate semantically distinct revision/event timelines (the same design choice STIPO-R made). Group these client-side by `links.scenario` / `links.hypothesis`; don't reach for `find_tips_where`.
 
 ---
 
@@ -263,3 +278,15 @@ The schema in `schemas/hashharness-schema.json` is **partial** — it declares o
 ```
 
 If `expected_prev` is stale, re-fetch and retry. **Do not** push the ATAM-only payload directly — it would drop sibling types from the head and break unrelated workflows reading them.
+
+**Add a superset assertion inside the retry loop** to make this safe under careless rebuilds (R-5 from the hashharness ATAM addendum). The CAS itself is sound; the danger is only a stale-rebuild that drops types because the caller didn't re-merge on the new head:
+
+```python
+current = mcp__hashharness__get_schema()
+merged  = {"types": {**current.get("types", {}), **atam_types}}
+assert set(current.get("types", {})).issubset(merged["types"]), \
+    "merge dropped types; refusing to push"
+mcp__hashharness__set_schema(schema=merged, expected_prev=current_head_sha)
+```
+
+This holds the invariant "schema head is type-superset-monotone" caller-side until `set_schema` itself enforces it server-side.
