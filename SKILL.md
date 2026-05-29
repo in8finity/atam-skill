@@ -1,6 +1,6 @@
 ---
 name: atam-evaluation
-description: Evaluate a software architecture using the Architecture Tradeoff Analysis Method (ATAM). Use when the user asks to "do an ATAM", "evaluate architecture tradeoffs", "build a utility tree", "find architectural risks/sensitivity points/tradeoffs", or wants a structured quality-attribute review of a system. Walks the user through all 9 ATAM phases step-by-step with explicit gates, producing per-phase artifacts (business drivers, architecture summary, approaches, utility tree, scenarios, analysis, risk themes) and a final consolidated report. Pulls inputs from architecture docs, source code, an optional external requirements doc, and interactive stakeholder input.
+description: Evaluate a software architecture using the Architecture Tradeoff Analysis Method (ATAM). Use when the user asks to "do an ATAM", "evaluate architecture tradeoffs", "build a utility tree", "find architectural risks/sensitivity points/tradeoffs", run an "architecture review", "challenge a finding with critical questions", "audit an evaluation", or wants a structured quality-attribute review of a system. Walks the user through 9 ATAM phases with explicit gates that loud-warn on unchallenged findings, structural-only severities (no measurement evidence), asserting non-risks, and zero-selected-scenario QAs — producing per-phase artifacts and a consolidated report. Includes a Walton critical-questions challenge step, a portfolio audit verb (cryptographic + structural trustworthiness check), and list-evaluations / portfolio-status verbs for cross-evaluation queries. Pulls inputs from architecture docs, source code, measurement evidence (perf logs, incident reports, benchmarks, feedback/), an optional external requirements doc, and interactive stakeholder input.
 ---
 
 # ATAM Evaluation
@@ -140,7 +140,7 @@ Each phase: **(a)** do the work, **(b)** write the artifact, **(c)** show the us
   - **Sensitivity point** — a property of one or more components critical to achieving a particular quality-attribute response
   - **Tradeoff point** — a sensitivity point that affects **more than one** quality attribute, often in opposing directions
 - **Cite evidence.** Every risk/sensitivity/tradeoff must reference a specific file, ADR, scenario, or stated decision. No findings from thin air.
-- **(B1) Consequence findings need hard evidence.** Before rating an `R`/`TP` finding `high` or `med`, check the Phase-0 measurement sources (perf logs, incident reports, test results) — not only structural reasoning. `record-finding` warns when a high/med R/TP cites no evidence of kind `measurement | incident | test_result`. A structural argument alone is weaker than a high severity implies; either find the measurement or lower the severity.
+- **(B1 / A5) Consequence findings need hard evidence — checked twice.** Before rating an `R`/`TP` finding `high` or `med`, check the Phase-0 measurement sources (perf logs, incident reports, test results) — not only structural reasoning. **At record time, B1**: `record-finding` warns when no evidence of kind `measurement | incident | test_result` is cited. **At report time, A5**: `close-phase --phase 9` lists every current high/med R/TP that remains structural-only as `structural_only_findings`. A structural argument alone is weaker than a high severity implies; either find the measurement or lower the severity. The B1 warning was historically absorbed as "say it and move on" — the A5 gate makes the gap visible *again* at the report boundary.
 - **(B3) Gates check claim precision, not just artifact completeness.** When approving a phase gate, don't just confirm the artifact exists — confirm each finding cites the *exact* mechanism, verified in code. A plausible-but-wrong mechanism ("iOS-only because silent-push returns early" when the real cause is a HealthKit-only data source) can pass a completeness check and reach the report. Ask: "is this mechanism the one in the code, or the one that sounds right?"
 - **Don't invent business drivers.** If the user can't supply them, mark the artifact `STATUS: stakeholder input needed` and stop — do not fabricate goals.
 - **Don't grade the architecture.** ATAM finds risks; it doesn't score "good/bad". Resist the urge to render a verdict.
@@ -308,7 +308,8 @@ $PY scripts/cli.py record-finding --workpackage "$WP" \
 The skill prefers Mode B when:
 1. `mcp__hashharness__get_schema` succeeds and payload contains `AtamBankProbe`, AND
 2. `scripts/cli.py` is executable, AND
-3. an `AtamInstrumentVersion` exists in `atam.refdata.<version>` (default `atam-v1`).
+3. an `AtamInstrumentVersion` exists in `atam.refdata.<version>` (default `atam-v1`), AND
+4. that bank has **≥ 1 `AtamBankProbe` record** (mere version presence is not enough — `open-evaluation` counts probes and emits a `warnings[]` entry when zero, in which case Mode B adaptive selection returns closure on every tick and you should use manual mode instead).
 
 Otherwise fall back to **Mode A** (direct MCP calls; LLM drives `create_item` itself) or further fall back to file-only mode (artifact-driven, no audit trail).
 
@@ -414,16 +415,27 @@ The `challenge` verb:
 
 See `references/cq-schemes.md` for the full Walton catalog (7 schemes, ~24 canonical CQs) and tiering heuristics.
 
-### P9 challenge gate (loud warning)
+### Close-phase gates (loud warnings at P5 and P9)
 
-`close-phase --phase 9` inspects every **current** (non-superseded) Finding of type `R`/`TP`/`SP` at severity `high`/`med` and reports any that have neither a `supersedes` revision nor a challenge marker:
+`close-phase --phase 5` runs **one** check and `--phase 9` runs **three**. None refuse — they print and proceed.
+
+**At P5:**
+- **(A2) `qas_zero_selected`** — QAs with zero selected scenarios. The (H,H)/(H,M) cut is a useful default but a whole QA falling below it is a decision the user should make explicitly. Add a leaf or waive in the artifact.
+
+**At P9** (inspects every *current* / non-superseded Finding):
+- **§11 `unchallenged_findings`** — `R`/`TP`/`SP` at `high`/`med` with neither a `supersedes` revision nor a `challenge` marker. ATAM resists a verdict; an un-challenged risk lean is itself a bias.
+- **(A3) `asserting_nrs_unchallenged`** — `NR` flagged `--asserts-property` that's never been challenged. A wrong "fast-path / O(1) / cheap" claim is the most dangerous class of error — it's invisible to gates that only filter on R/TP unless explicitly flagged.
+- **(A5) `structural_only_findings`** — `R`/`TP` at `high`/`med` whose evidence is only `file_ref`/`quote`/`doc`/`adr` (no `measurement`/`incident`/`test_result`). Structural reasoning alone is weaker than the severity implies; either add hard evidence or lower the severity.
 
 ```json
-{"ok": true, "gate_sha": "...", "unchallenged_findings": [{"sha": "...", "title": "...", "severity": "high", "type": "R"}],
- "warnings": ["§11 CHALLENGE GATE: 2 high/med finding(s) reach P9 with no recorded CQ challenge ..."]}
+{"ok": true, "gate_sha": "...",
+ "unchallenged_findings": [...], "asserting_nrs_unchallenged": [...],
+ "structural_only_findings": [...], "qas_zero_selected": [],
+ "warnings": ["§11 CHALLENGE GATE: N high/med ...", "A3 NR-CHALLENGE GATE: ...",
+              "A5 STRUCTURAL-ONLY GATE: ..."]}
 ```
 
-It **warns and proceeds** (does not refuse) — but a clean run should show `unchallenged_findings: []`. Run `challenge` on each listed finding before relying on the report.
+A clean run shows all four lists empty. Use `cli.py audit --workpackage <wp>` for the same four checks combined with a cryptographic verify in one command.
 
 ### When to skip
 
@@ -468,20 +480,22 @@ For each phase gate, the **default decision** is what `auto` picks and what `ass
 | **P2 Business drivers** | **No default.** Drivers must come from the user/stakeholders. | **CRITICAL** — house rule: *never fabricate business drivers.* If the user can't supply them, mark `STATUS: stakeholder input needed` and pause. | P0 done. |
 | **P3 Architecture** | Summarize from docs + code inspection. | no (but flag if architecture cannot be derived from available inputs) | P2 done. |
 | **P4 Approaches** | Name approaches/tactics from `references/architectural-approaches.md`. | no | P3 done. |
-| **P5 Utility tree** | Build leaves; rate (Importance, Difficulty); default-select all (H,H)+(H,M) for analysis. | **CRITICAL** — which leaves to analyze is a prioritization judgment; confirm the selected set with the user. | P2 + at least one scenario per top-3 QA. |
-| **P6 Analyze** | Drive the bank loop (`next-probe`→record-question→record-finding→update-coverage) to closure; or manual-mode record-finding if the bank is empty. | no | P5 selected leaves exist. |
+| **P5 Utility tree** | Build leaves; rate (Importance, Difficulty); default-select all (H,H)+(H,M) for analysis. **`close-phase --phase 5` also warns (A2) when any QA has zero selected scenarios** — surface that as a pause-and-ask in guided/assisted. | **CRITICAL** — which leaves to analyze is a prioritization judgment; confirm the selected set with the user. | P2 + at least one scenario per top-3 QA. |
+| **P6 Analyze** | Drive the bank loop (`next-probe`→record-question→record-finding→update-coverage) to closure; or manual-mode record-finding if the bank is empty. For Perf/Scale/Avail leaves, **(A4)** prompt for a measurement probe (record output as `kind=measurement`) rather than relying on structural reasoning alone. **(B1)** `record-finding` warns at record-time when a high/med R/TP cites no hard evidence; **(A3)** flag property-asserting NRs with `--asserts-property` so the P9 gate catches them. | no | P5 selected leaves exist. |
 | **§11 Challenge** | Challenge **every** high/med R/TP/SP finding (`cli.py challenge`). | **CRITICAL** — never auto-waive a challenge; the abductive "working-as-designed" CQ is mandatory for high-R findings. | At least one high/med finding. |
 | **P7 Brainstorm** | Generate use/growth/exploratory scenarios; self-vote if solo. **Auto-skip for endpoint/module scope.** | no | P6 done. |
 | **P8 Re-analyze** | Bank loop against the top-voted P7 scenarios. **Auto-skip if P7 skipped.** | no | P7 done. |
-| **P9 Themes + report** | Cluster findings into themes (post-challenge set), map to drivers, write recommendations, render `REPORT.md`. | no — but `close-phase --phase 9` runs the **challenge gate** (loud warning on unchallenged high/med findings); treat a non-empty `unchallenged_findings` list as a pause-and-ask in guided/assisted. | P8 (or P6 if P7/P8 skipped) done; §11 challenges recorded. |
+| **P9 Themes + report** | Cluster findings into themes (post-challenge set), map to drivers, write recommendations, render `REPORT.md`. `close-phase --phase 9` runs **three gates** (§11 challenge, A3 asserting NRs, A5 structural-only severities); treat any non-empty list as a pause-and-ask in guided/assisted. `cli.py audit` combines all three with a cryptographic verify for a one-shot trustworthiness verdict. | no (but the three P9 gates may produce pause-worthy output) | P8 (or P6 if P7/P8 skipped) done; §11 challenges recorded. |
 
 ### Never-auto rules (hold in every mode, including `auto`)
 
 1. **Don't fabricate business drivers** (P2). No driver → pause, even in `auto`.
 2. **Don't auto-waive a challenge** (§11). Every high/med finding gets a real CQ pass; record the marker.
 3. **Don't auto-skip the abductive / "working-as-designed" CQ** for high-R findings (B2).
-4. **Don't render a verdict.** ATAM surfaces risks; it does not grade the architecture.
-5. **Don't write artifacts into the target repo's VCS** without asking (A10) — default to the evaluator's workspace or a git-ignored path.
+4. **Don't auto-waive an A5 structural-only severity** for measured QAs (Perf/Scale/Avail). If `record-finding`'s B1 warning fires and no hard evidence can be added, lower the severity rather than ship the finding at high/med with structural-only support.
+5. **Don't auto-skip an A2 zero-selected QA at P5** — a whole QA falling below the analysis cut is a user judgment, not a mechanical outcome.
+6. **Don't render a verdict.** ATAM surfaces risks; it does not grade the architecture.
+7. **Don't write artifacts into the target repo's VCS** without asking (A10) — default to the evaluator's workspace or a git-ignored path.
 
 ### Scope note
 
