@@ -329,6 +329,8 @@ The `cli.py challenge` verb is self-contained: it detects the Finding's argument
 
 For contested reasoning that warrants an explicit argument graph, hand off to the **`aif-arguments` skill**, which records the exchange as I-nodes (claims), RA-nodes (inference steps), CA-nodes (conflicts/attacks), PA-nodes (preferences) in the same hashharness store. (Note: there is no `IndividualCriticalQuestion` type — a CQ becomes an `AifInode` + an `AifCA` against the finding's `AifRA`.) A challenge exchange is then queryable from both sides: as ATAM Findings with `supersedes` links, and as an AIF argument graph.
 
+**AIF authoring contract — emit canonical premise roles, not ad-hoc names.** When you author the finding's `AifRA`, set `attributes.scheme` to the registry key and `attributes.premise_roles` to that scheme's **canonical Walton roles, in order, one premise per role** (arity). `cli.py challenge` returns this per scheme in its `aif_authoring` block (`scheme_key_to_tag`, `required_premise_roles`, `arity`); the authoritative source is `aif-check-scheme.py --roles <scheme> --format json`. Two gotchas, from a 2026-05-29 audit that found 10/13 ATAM-emitted RAs failing `aif-validate.py [F3]`: (1) this skill's `precedent` is tagged as the registry key **`analogy`**; (2) `cause_to_effect` needs **two** premises (`causal_generalization` + `cause_present`), not a single merged `["cause"]` — see `references/cq-schemes.md` for the full table and the arity/resolution rules.
+
 ### Process
 
 ```

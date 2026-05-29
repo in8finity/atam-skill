@@ -6,6 +6,26 @@ Used by the **challenge step** (see SKILL.md §11) and consumable by the `aif-ar
 
 > **Recording note.** There is no `IndividualCriticalQuestion` hashharness type. The challenge step records its work two ways: (1) the `cli.py challenge` verb writes a lightweight **`AtamEvidence`** record (`kind=quote`) with `attributes.challenged_finding_sha` naming the target — this is the marker the P9 gate looks for; (2) if you hand off to `aif-arguments` for a full argument graph, each CQ becomes an `AifInode` (the question as a claim) plus an `AifCA` (the conflict/attack against the finding's `AifRA` inference node). Use the lightweight path by default; reach for the AIF graph when the reasoning is contested enough to warrant explicit premise/conclusion/attacker modeling.
 
+> **AIF authoring contract (premise roles + arity).** When you build an `AifRA` for a finding, `aif-validate.py`'s `[F3]` scheme-fullness check requires `AifRA.attributes.premise_roles` to be the scheme's **canonical Walton role names, in order**, with **one premise per role** (arity). Ad-hoc names (`["cause"]`, `["observation","observation"]`) fail — a 2026-05-29 audit found 10/13 ATAM-emitted RAs failing exactly this. The **authoritative source** is the aif-arguments JSON contract — do not hardcode or scrape the human text:
+> ```bash
+> aif-check-scheme.py --roles <scheme_key> --format json   # → {required_roles, ...}
+> ```
+> `cli.py challenge` also surfaces this per detected scheme in its `aif_authoring` output block. Note: tag `AifRA.attributes.scheme` with the **registry key** — this skill's `precedent` maps to the registry's `analogy`.
+>
+> | Scheme (CQ catalog name) | Registry key to tag | Required `premise_roles` (in order) |
+> |---|---|---|
+> | negative_consequences | `negative_consequences` | `action`, `bad_consequence` |
+> | cause_to_effect | `cause_to_effect` | `causal_generalization`, `cause_present` |
+> | sign | `sign` | `sign_observed`, `sign_indicates` |
+> | evidence_to_hypothesis | `evidence_to_hypothesis` | `hypothesis_predicts`, `observation` |
+> | abductive | `abductive` | `data`, `best_explanation` |
+> | precedent | `analogy` | `base_case`, `similarity` |
+> | practical_reasoning | `practical_reasoning` | `goal`, `means` |
+>
+> **Arity matters (1a).** `cause_to_effect` needs *two distinct* premises — a `causal_generalization` ("X-type causes Y-type") and a `cause_present` ("X holds here") — not one merged `["cause"]`. If only one premise genuinely exists, either split the reasoning to make the defeasible generalization explicit and attackable, or tag a scheme whose roles match what's present. Same for `evidence_to_hypothesis`: supply a `hypothesis_predicts` premise, not three `observation`s.
+>
+> **Resolution (item 2, optional).** When a CQ is decided, mint an `AifPA(preferred, dispreferred)` so `aif-validate.py` doesn't read the attack as unresolved (`[D1]`). Recording the outcome only as a CA attribute preserves history but leaves every attack "open" in the validator's view.
+
 ## How to use this doc
 
 1. Identify what argumentative shape your Finding (or Recommendation) takes — see "Scheme triggers" below.

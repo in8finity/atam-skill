@@ -726,6 +726,56 @@ SCHEME_CATALOG = {
 }
 
 
+# AIF authoring contract (from aif-arguments feedback, 2026-05-29).
+# When the challenge hand-off authors an AifRA for a finding, the node's
+# attributes.scheme must be the registry KEY below, and attributes.premise_roles
+# must be the required_roles verbatim and in order — one premise per role (arity).
+# Ad-hoc roles like ["cause"]/["observation"] fail aif-validate.py's [F3] check.
+#
+# AUTHORITATIVE SOURCE is the aif-arguments JSON contract, not this table:
+#   aif-check-scheme.py --roles <scheme_key> --format json   → {required_roles, ...}
+# This table mirrors it as of 2026-05-29 for the 7 schemes ATAM tags; verify
+# against the CLI if the registry has changed.
+#
+# Note: this skill's "precedent" maps to the registry key "analogy".
+SCHEME_REGISTRY_KEY = {
+    "negative_consequences": "negative_consequences",
+    "cause_to_effect": "cause_to_effect",
+    "sign": "sign",
+    "evidence_to_hypothesis": "evidence_to_hypothesis",
+    "abductive": "abductive",
+    "precedent": "analogy",
+    "practical_reasoning": "practical_reasoning",
+}
+SCHEME_PREMISE_ROLES = {
+    "negative_consequences": ["action", "bad_consequence"],
+    "cause_to_effect": ["causal_generalization", "cause_present"],
+    "sign": ["sign_observed", "sign_indicates"],
+    "evidence_to_hypothesis": ["hypothesis_predicts", "observation"],
+    "abductive": ["data", "best_explanation"],
+    "analogy": ["base_case", "similarity"],
+    "practical_reasoning": ["goal", "means"],
+}
+
+
+def _aif_authoring_for(scheme: str) -> dict:
+    """Return the AifRA authoring contract for a CQ scheme: the registry key to
+    tag, the required premise_roles (in order), and the arity (one premise per role)."""
+    key = SCHEME_REGISTRY_KEY.get(scheme, scheme)
+    roles = SCHEME_PREMISE_ROLES.get(key, [])
+    return {
+        "scheme_key_to_tag": key,
+        "required_premise_roles": roles,
+        "arity": len(roles),
+        "note": (
+            f"Author one AifInode premise per role ({len(roles)} premises), set "
+            f"AifRA.attributes.premise_roles={roles} in this order, and "
+            f"attributes.scheme='{key}'. Authoritative: "
+            f"aif-check-scheme.py --roles {key} --format json."
+        ),
+    }
+
+
 def _infer_schemes(finding_attrs: dict, finding_links: dict) -> list[str]:
     """Heuristic scheme detection based on a Finding's shape."""
     schemes: list[str] = []
@@ -841,11 +891,16 @@ def verb_challenge(args) -> None:
         evidence_summaries=evidence_summaries,
         critical_questions=cqs,
         challenge_marker_sha=marker_sha,
+        aif_authoring={s: _aif_authoring_for(s) for s in schemes},
         next_step=(
             "Answer the Tier-A CQs. For productive critiques, use 'record-finding --supersedes' "
             "to revise (downgrade severity / reframe causality). If the finding stands, this "
             "challenge marker already records that it was challenged (satisfies the P9 gate). "
-            "Optionally hand off to aif-arguments to build I/RA/CA/PA nodes for the exchange."
+            "If you build the AIF graph via aif-arguments: tag AifRA.attributes.scheme with the "
+            "registry key in aif_authoring[scheme].scheme_key_to_tag, set premise_roles to "
+            "required_premise_roles verbatim/in-order, and supply one AifInode premise per role "
+            "(arity) — ad-hoc roles fail aif-validate.py [F3]. When a CQ is decided, optionally "
+            "mint an AifPA(preferred, dispreferred) so the resolution isn't read as open [D1]."
         ),
     )
 
