@@ -29,38 +29,51 @@ The through-line: **ATAM finds risks; it does not grade the architecture.** No l
 
 ---
 
-## Practical usage: a 90-second walk-through
+## Practical usage: the skill evaluated by itself
+
+The most honest demonstration is to point the skill at *its own* architecture. Here's an abridged walk-through of an ATAM of `atam-evaluation` — the spec (`SKILL.md`), the Mode-B controller (`scripts/`), and the hashharness append-only backend — treated as one subsystem.
 
 **You say:**
 
-> "Evaluate the architecture of our user-behaviour analytics subsystem."
+> "Evaluate the architecture of this project — the atam-evaluation skill itself."
 
-**The skill runs the 9 ATAM phases, pausing at each gate.** Here's what a real run produced (abridged from [`reports/atam-uba-2026-05-27.md`](reports/atam-uba-2026-05-27.md)):
+**The skill runs the 9 ATAM phases, pausing at each gate.**
 
-**P2 — Business drivers** (it asks *you*; it never invents them):
+**P2 — Business drivers** (it asks *you*; it never invents them). As the skill's maintainer you supply:
 
 | # | Driver |
 |---|--------|
-| BD1 | Understand user-segment behaviour |
-| BD2 | Measure the impact of app changes (release → behaviour delta) |
+| BD1 | Produce **tamper-evident** evaluation records — the audit trail *is* the product |
+| BD2 | Actually **catch weak findings** — unchallenged risks, structural-only severities, property-asserting non-risks, unanalyzed QAs |
+| BD3 | Be drivable both **interactively** and by the **`pm-*` automation** drivers |
+| BD4 | Be **portable** across arbitrary target repos |
 
-**P3 — Architecture** (summarized from docs + code): a single shared OLTP PostgreSQL serving as *both* the app's source of truth and the analytics store; behavioural events inferred at query time rather than being first-class.
+**P3/P4 — Architecture & approaches** (from spec + code): an **immutable, hash-chained audit ledger** (hashharness MCP) written by an **adaptive selection loop** (bank probe → LLM generation → critique gate, in `selection.py`/`generator.py`/`critic.py`), with **graceful degradation** across three modes — Mode B (controller CLI) → Mode A (direct MCP) → file-only.
 
-**P5 — Utility tree** ranks the quality attributes: `modifiability > availability > security > performance`.
+**P5 — Utility tree** ranks the QAs: `auditability > correctness-of-gates > usability > portability`.
 
-**P6 + §11 — Analysis, then challenge.** 18 findings surface — 8 rated R-high. Each high finding is challenged before it counts. The non-obvious one:
+**P6 + §11 — Analysis, then challenge.** The non-obvious finding — and it's self-referential:
 
-> **F16R** — The team *does* have a week-over-week comparison framework (`cohort_markov_pivot.py`), but the system can't **attribute** an observed behaviour delta to a specific release. So BD2 is *coarsely* met, not fully met.
+> **R-high → revised** — Mode B silently falls back to **file-only** when any prerequisite is missing (no hashharness, empty probe bank, non-executable `cli.py`); `open-evaluation` only *warns* on a zero-probe bank, it doesn't refuse (`scripts/cli.py:196`). File-only drops the append-only ledger — i.e. **BD1's entire value** — with no loud signal. The §11 abductive CQ *"isn't this just working-as-designed graceful degradation?"* **landed**, so the finding was **revised**: the risk isn't that it degrades, it's that it degrades *without telling you the audit trail is now gone.*
 
-That is the kind of finding prose reviews miss: not "you're missing analytics," but "your analytics can't answer the business question you built them for." It only surfaced because the analysis was tied back to a named business driver and grounded in the actual file.
+That reframing — kept as `supersedes`, with the original preserved — is exactly what the challenge step is for.
+
+**The skill catches its own weak evidence.** That R-high cites only `file_ref` + `doc` evidence, so `close-phase --phase 9` flags it under the **A5 structural-only gate** — the skill holds its *own* finding to the same bar: attach a measurement (seed a broken config, observe the silent fallback) or lower the severity. Meanwhile the load-bearing non-risk *"the chain proves records weren't tampered with"* is marked `--asserts-property`, so the **A3 gate** forces it to be challenged rather than trusted — it's sound only if `verify_work_package` really re-checks content hashes, chain links, and schema binding.
 
 **P9 — Risk themes mapped to drivers:**
 
-> The dominant theme — **silent schema-semantics drift** — has already materialised twice in production (the 2026-05-11 content-corruption incident; a documented SQL-side drift worked around in code). Themes T1 and T4 directly threaten BD1/BD2.
+> **T1 — Silent trust erosion** (the file-only fallback + the fact that `audit`'s `trustworthy=true` verdict is a *sensitivity point*: it rests entirely on the four gate checks in `cli.py` plus the crypto verify — one defect there yields a false all-clear). Threatens **BD1** and **BD2**.
+> **T2 — Core value is asserted, not measured** — the gates' catch-rate is a structural claim; nothing yet *proves* `audit` flags a seeded weak finding. Threatens **BD2**.
 
-Note "already materialised twice in production" — that's an *incident* citation, not structural speculation. The gate is satisfied because the severity is backed by something that actually happened.
+**Recommendations**, prioritized with Impact/Effort:
 
-**Recommendations** come out prioritized and, where a critical question split them, paired (a cheaper *do-now* beside a heavier *do-later*) — conventional engineering moves (disable auto-sync, add a read replica, separate DB users), each addressing a named theme.
+| Recommendation | Impact | Effort |
+|---|---|---|
+| Print a loud `NO AUDIT TRAIL` banner when running file-only (at open *and* in `REPORT.md`) | H | S |
+| Add a regression corpus of seeded weak findings; assert `audit` catches each — turns BD2 from *structural* to *measured* | H | M |
+| Make `open-evaluation` **refuse** (not just warn) on a zero-probe bank unless `--allow-file-only` is passed | M | S |
+
+The point isn't that these are dramatic findings — it's that a review of a system *by its own author* still surfaced a silent-degradation risk, a false-verdict sensitivity point, and an honestly-flagged gap in its own evidence, **because the gates wouldn't let the loose reasoning through.**
 
 ---
 
