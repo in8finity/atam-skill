@@ -164,6 +164,10 @@ Each phase: **(a)** do the work, **(b)** write the artifact, **(c)** show the us
 - `templates/analysis.md` — per-scenario analysis with R/SP/TP slots
 - `templates/report.md` — final consolidated report skeleton
 
+## Companion agent
+
+- `agents/architecture-evaluator.md` — a Claude Code subagent (expert software architect, ATAM-proficient) that drives this skill. It carries the finding-type model, the house rules (measurement-beats-structural, no fabricated drivers, no verdict, artifacts out of the target's VCS), the §11 challenge discipline, and knows to invoke `atam-evaluation` rather than reimplement ATAM. Install by symlinking or copying it into an agents directory Claude Code discovers (`~/.claude/agents/` for global use, or `<repo>/.claude/agents/` per-project), then invoke via the Agent tool with `subagent_type: architecture-evaluator`.
+
 ---
 
 ## Adaptive control (Mode B — controller CLI)
