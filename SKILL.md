@@ -101,7 +101,7 @@ Each phase: **(a)** do the work, **(b)** write the artifact, **(c)** show the us
   - Probe with quality-attribute-specific questions (see `references/probing-questions.md`)
   - Record **risks, non-risks, sensitivity points, tradeoff points**
 - **(A4) Run a probe for Performance / Scalability / Availability leaves.** ATAM-as-written is doc-reading + code-reading; that's fine for structural QAs but **insufficient for measured ones** — you cannot read your way to "189s" or "collapses at 6 workers." For any analyzed Perf/Scale/Avail leaf, *write a minimal probe* (a 10-line load script, a `time` invocation, a benchmark) and capture the output as `AtamEvidence kind=measurement`. If the user declines, record the finding's evidence as `structural-only` so the P9 gate can flag it (A5).
-- **(A3) Challenge load-bearing non-risks.** A wrong-but-plausible NR ("O(1) fast path", "constant time", "cheap operation") is invisible to every gate that filters on R/TP. When a Phase-4 approach or Phase-6 NR asserts a *property* the analysis leans on, set `--asserts-property` on `record-finding`. The P9 gate then requires the assertion to be challenged like an R/TP — and `record-finding` warns immediately at record-time so the requirement isn't deferred to report time.
+- **(A3) Challenge load-bearing non-risks.** A wrong-but-plausible NR ("O(1) fast path", "constant time", "cheap operation") is invisible to every gate that filters on R/TP. When a Phase-4 approach or Phase-6 NR asserts a *property* the analysis leans on, set `--asserts-property` on `record-finding`. The P9 gate then requires the assertion to be challenged like an R/TP — and `record-finding` warns immediately at record-time so the requirement isn't deferred to report time. **(R3) The flag is no longer purely manual:** `record-finding` **auto-promotes** an NR whose title/description contains property-asserting language (`O(1)`, `constant-time`, `fast-path`, `cheap`, `scales`, `indexed`, `guaranteed`, …) — it sets `asserts_property` and loud-warns `A3 AUTO-PROMOTE` — and the P9/audit gate adds an **unflagged-NR backstop** that catches any property-asserting NR that reached the report unflagged *and* unchallenged. Coverage of the incident-proven "wrong O(1) NR" class no longer depends on the evaluator remembering the flag.
 - Use `templates/analysis.md`
 - Write `05-analysis.md`
 - **Gate:** review findings; user may add probes
@@ -124,11 +124,12 @@ Each phase: **(a)** do the work, **(b)** write the artifact, **(c)** show the us
 - Produce actionable **recommendations**
 - Write `08-risk-themes.md` and `REPORT.md`
 - **Gate:** final review with user.
-- **`close-phase --phase 9` runs four loud-warning checks** (none refuse — they print and proceed):
+- **`close-phase --phase 9` runs five loud-warning checks** (none refuse — they print and proceed):
   1. **§11 challenge gate** — every current high/med R/TP/SP finding must have either a `supersedes` revision or an `AtamEvidence` challenge marker.
-  2. **(A3) NR-challenge gate** — every NR with `asserts_property=true` must also be challenged.
-  3. **(A5) Structural-only gate** — every current high/med R/TP must cite evidence of kind `measurement | incident | test_result`. Pure `file_ref`/`quote`/`doc` evidence is weaker than the severity implies for measured QAs (see B1 + A1).
-  4. A non-empty `qas_zero_selected` list from P5 should already be resolved by P9 (gate proceeds either way).
+  2. **(A3) NR-challenge gate** — every NR with `asserts_property=true` (set manually or by R3 auto-promote) must also be challenged.
+  3. **(R3) Unflagged-NR backstop** — every current NR whose *text* asserts a property (`O(1)`, `constant-time`, `scales`, …) but that is unflagged *and* unchallenged is surfaced; catches property claims the flag/auto-promote missed.
+  4. **(A5) Structural-only gate** — every current high/med R/TP must cite evidence of kind `measurement | incident | test_result`. Pure `file_ref`/`quote`/`doc` evidence is weaker than the severity implies for measured QAs (see B1 + A1).
+  5. A non-empty `qas_zero_selected` list from P5 should already be resolved by P9 (gate proceeds either way).
 - Use `cli.py audit --workpackage <wp>` for a one-shot trustworthiness report combining cryptographic + structural checks.
 
 ## House rules
@@ -421,22 +422,23 @@ See `references/cq-schemes.md` for the full Walton catalog (7 schemes, ~24 canon
 
 ### Close-phase gates (loud warnings at P5 and P9)
 
-`close-phase --phase 5` runs **one** check and `--phase 9` runs **three**. None refuse — they print and proceed.
+`close-phase --phase 5` runs **one** check and `--phase 9` runs **four**. None refuse — they print and proceed.
 
 **At P5:**
 - **(A2) `qas_zero_selected`** — QAs with zero selected scenarios. The (H,H)/(H,M) cut is a useful default but a whole QA falling below it is a decision the user should make explicitly. Add a leaf or waive in the artifact.
 
 **At P9** (inspects every *current* / non-superseded Finding):
 - **§11 `unchallenged_findings`** — `R`/`TP`/`SP` at `high`/`med` with neither a `supersedes` revision nor a `challenge` marker. ATAM resists a verdict; an un-challenged risk lean is itself a bias.
-- **(A3) `asserting_nrs_unchallenged`** — `NR` flagged `--asserts-property` that's never been challenged. A wrong "fast-path / O(1) / cheap" claim is the most dangerous class of error — it's invisible to gates that only filter on R/TP unless explicitly flagged.
+- **(A3) `asserting_nrs_unchallenged`** — `NR` flagged `--asserts-property` (manually or by R3 auto-promote) that's never been challenged. A wrong "fast-path / O(1) / cheap" claim is the most dangerous class of error — it's invisible to gates that only filter on R/TP unless flagged.
+- **(R3) `unflagged_property_nrs`** — `NR` whose *text* asserts a property (`O(1)`, `constant-time`, `scales`, …) but that reached P9 **unflagged and unchallenged**. Backstops the case where auto-promote didn't fire (legacy records, or findings written outside `record-finding`). Challenge each, or supersede if the claim isn't load-bearing.
 - **(A5) `structural_only_findings`** — `R`/`TP` at `high`/`med` whose evidence is only `file_ref`/`quote`/`doc`/`adr` (no `measurement`/`incident`/`test_result`). Structural reasoning alone is weaker than the severity implies; either add hard evidence or lower the severity.
 
 ```json
 {"ok": true, "gate_sha": "...",
  "unchallenged_findings": [...], "asserting_nrs_unchallenged": [...],
- "structural_only_findings": [...], "qas_zero_selected": [],
+ "unflagged_property_nrs": [...], "structural_only_findings": [...], "qas_zero_selected": [],
  "warnings": ["§11 CHALLENGE GATE: N high/med ...", "A3 NR-CHALLENGE GATE: ...",
-              "A5 STRUCTURAL-ONLY GATE: ..."]}
+              "A3 UNFLAGGED-NR BACKSTOP: ...", "A5 STRUCTURAL-ONLY GATE: ..."]}
 ```
 
 A clean run shows all four lists empty. Use `cli.py audit --workpackage <wp>` for the same four checks combined with a cryptographic verify in one command.
@@ -489,7 +491,7 @@ For each phase gate, the **default decision** is what `auto` picks and what `ass
 | **§11 Challenge** | Challenge **every** high/med R/TP/SP finding (`cli.py challenge`). | **CRITICAL** — never auto-waive a challenge; the abductive "working-as-designed" CQ is mandatory for high-R findings. | At least one high/med finding. |
 | **P7 Brainstorm** | Generate use/growth/exploratory scenarios; self-vote if solo. **Auto-skip for endpoint/module scope.** | no | P6 done. |
 | **P8 Re-analyze** | Bank loop against the top-voted P7 scenarios. **Auto-skip if P7 skipped.** | no | P7 done. |
-| **P9 Themes + report** | Cluster findings into themes (post-challenge set), map to drivers, write recommendations, render `REPORT.md`. `close-phase --phase 9` runs **three gates** (§11 challenge, A3 asserting NRs, A5 structural-only severities); treat any non-empty list as a pause-and-ask in guided/assisted. `cli.py audit` combines all three with a cryptographic verify for a one-shot trustworthiness verdict. | no (but the three P9 gates may produce pause-worthy output) | P8 (or P6 if P7/P8 skipped) done; §11 challenges recorded. |
+| **P9 Themes + report** | Cluster findings into themes (post-challenge set), map to drivers, write recommendations, render `REPORT.md`. `close-phase --phase 9` runs **four gates** (§11 challenge, A3 asserting NRs, R3 unflagged-property-NR backstop, A5 structural-only severities); treat any non-empty list as a pause-and-ask in guided/assisted. `cli.py audit` combines all four with a cryptographic verify for a one-shot trustworthiness verdict. | no (but the P9 gates may produce pause-worthy output) | P8 (or P6 if P7/P8 skipped) done; §11 challenges recorded. |
 
 ### Never-auto rules (hold in every mode, including `auto`)
 

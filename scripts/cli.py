@@ -165,6 +165,38 @@ def _create_evidence_inline(adapter, wp: str, eval_sha: str, spec_str: str) -> s
 _HARD_EVIDENCE_KINDS = {"measurement", "incident", "test_result"}
 
 
+# (R3 / F4) Language that signals a load-bearing *property* claim — the class of
+# non-risk that is invisible to every gate unless flagged asserts_property. A wrong
+# "O(1) fast path" NR reaching a completed report (surfaced only by a production
+# incident) is the incident-proven failure mode. These patterns let record-finding
+# auto-promote such NRs and let the P9/audit gate backstop any that slip through,
+# so coverage no longer depends on the evaluator remembering the flag.
+import re  # noqa: E402
+
+_PROPERTY_ASSERTION_PATTERNS = [
+    r"\bO\(\s*1\s*\)", r"\bO\(\s*n\s*\)", r"\bO\(\s*log", r"\bamortized\b",
+    r"\bconstant[- ]time\b", r"\blinear[- ]time\b", r"\bfast[- ]?path\b",
+    r"\bhot[- ]?path\b", r"\bcheap(ly)?\b", r"\bnegligible\b", r"\btrivial(ly)?\b",
+    r"\bno[- ]overhead\b", r"\bzero[- ]cost\b", r"\bO\(1\)\b", r"\bindexed\b",
+    r"\bscales?\b", r"\bscalable\b", r"\bhorizontally\b", r"\binstant(aneous)?\b",
+    r"\block[- ]free\b", r"\bwait[- ]free\b", r"\bidempotent\b",
+    r"\balways\b", r"\bnever fails?\b", r"\bguaranteed\b", r"\bbounded\b",
+]
+_PROPERTY_ASSERTION_RE = re.compile("|".join(_PROPERTY_ASSERTION_PATTERNS), re.IGNORECASE)
+
+
+def _asserts_property_language(*texts: str) -> str | None:
+    """Return the first property-asserting phrase found across the given texts,
+    or None. Used to catch load-bearing non-risks the evaluator didn't flag."""
+    for t in texts:
+        if not t:
+            continue
+        m = _PROPERTY_ASSERTION_RE.search(t)
+        if m:
+            return m.group(0)
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Verb handlers
 # --------------------------------------------------------------------------- #
@@ -227,6 +259,7 @@ def verb_close_phase(args) -> None:
     unchallenged: list[dict] = []
     structural_only: list[dict] = []
     asserting_nrs_unchallenged: list[dict] = []
+    unflagged_property_nrs: list[dict] = []
     qas_zero_selected: list[str] = []
 
     # A2 (perf-miss feedback): at the P5 boundary, surface QAs with 0 selected
@@ -330,6 +363,35 @@ def verb_close_phase(args) -> None:
                 "the one that sounds right."
             )
 
+        # (R3 / F4) Report-time backstop: catch non-risks whose TEXT asserts a
+        # load-bearing property but that were never flagged asserts_property (and so
+        # escape the A3 gate above) and never challenged. record-finding auto-promotes
+        # these, but this covers NRs recorded before that heuristic or via other paths.
+        for f in findings:
+            sha = f["record_sha256"]
+            if sha in superseded:
+                continue
+            a = f.get("attributes", {})
+            if a.get("finding_type") != "NR" or a.get("asserts_property"):
+                continue
+            hit = _asserts_property_language(f.get("title", ""), a.get("description", ""))
+            if not hit:
+                continue
+            links = f.get("links") or {}
+            if bool(links.get("supersedes")) or sha in challenged_shas:
+                continue
+            unflagged_property_nrs.append({
+                "sha": sha, "title": f.get("title", ""), "phrase": hit,
+            })
+        if unflagged_property_nrs:
+            warnings.append(
+                f"A3 UNFLAGGED-NR BACKSTOP: {len(unflagged_property_nrs)} non-risk "
+                "finding(s) assert a property (e.g. "
+                f"'{unflagged_property_nrs[0]['phrase']}') in their text but were never "
+                "flagged --asserts-property or challenged — invisible to every gate. "
+                "Challenge each (or supersede), or confirm the claim isn't load-bearing."
+            )
+
         # A5: surface high/med R/TP findings whose evidence is structural-only
         # (no measurement|incident|test_result). B1 fires at record-time as a print;
         # this is the gate at report-time so the warning isn't absorbed as a caveat.
@@ -369,6 +431,7 @@ def verb_close_phase(args) -> None:
         unchallenged_findings=unchallenged,
         structural_only_findings=structural_only,
         asserting_nrs_unchallenged=asserting_nrs_unchallenged,
+        unflagged_property_nrs=unflagged_property_nrs,
         qas_zero_selected=qas_zero_selected)
 
 
@@ -407,6 +470,7 @@ def verb_audit(args) -> None:
     unchallenged: list[dict] = []
     structural_only: list[dict] = []
     asserting_unchallenged: list[dict] = []
+    unflagged_property_nrs: list[dict] = []
     for f in findings:
         sha = f["record_sha256"]
         if sha in superseded:
@@ -423,6 +487,11 @@ def verb_audit(args) -> None:
         # A3 unchallenged NR with asserts_property
         if ft == "NR" and a.get("asserts_property") and not (is_revision or is_marked):
             asserting_unchallenged.append({"sha": sha, "title": f.get("title", "")})
+        # (R3 / F4) unflagged NR whose text asserts a load-bearing property
+        if ft == "NR" and not a.get("asserts_property") and not (is_revision or is_marked):
+            hit = _asserts_property_language(f.get("title", ""), a.get("description", ""))
+            if hit:
+                unflagged_property_nrs.append({"sha": sha, "title": f.get("title", ""), "phrase": hit})
         # A5 structural-only high/med consequence findings
         if ft in ("R", "TP") and sev in ("high", "med"):
             ev_shas = links.get("evidence", []) or []
@@ -460,11 +529,13 @@ def verb_audit(args) -> None:
             "unchallenged_findings": unchallenged,
             "structural_only_findings": structural_only,
             "asserting_nrs_unchallenged": asserting_unchallenged,
+            "unflagged_property_nrs": unflagged_property_nrs,
             "qas_with_zero_selected_scenarios": qas_zero_selected,
         },
         trustworthy=(
             crypto.get("ok") and not unchallenged and not structural_only
-            and not asserting_unchallenged and not qas_zero_selected
+            and not asserting_unchallenged and not unflagged_property_nrs
+            and not qas_zero_selected
         ),
     )
 
@@ -716,6 +787,22 @@ def verb_record_finding(args) -> None:
                 "alone is weaker than the severity implies."
             )
 
+    # (R3 / F4) Auto-promote a non-risk that asserts a load-bearing property but
+    # wasn't flagged --asserts-property. Coverage of wrong "O(1)/fast-path/cheap"
+    # non-risks must not depend on the evaluator remembering the flag.
+    asserts_property_effective = bool(args.asserts_property)
+    if args.finding_type == "NR" and not asserts_property_effective:
+        hit = _asserts_property_language(args.title, args.description)
+        if hit:
+            asserts_property_effective = True
+            warnings.append(
+                f"A3 AUTO-PROMOTE: this NR asserts a property ('{hit}') but wasn't "
+                "flagged --asserts-property. Auto-flagging it so the A3 gate requires "
+                "a challenge before P9 — a wrong 'fast-path/O(1)/cheap' non-risk is "
+                "the most dangerous class. Challenge it, or supersede with the flag "
+                "removed if the claim isn't load-bearing."
+            )
+
     links: dict = {
         "evaluation": args.evaluation_sha,
         "scenario": args.scenario_sha,
@@ -741,7 +828,7 @@ def verb_record_finding(args) -> None:
             "phase": args.phase,
             "severity": args.severity,
             "promotion_reason": args.promotion_reason,
-            "asserts_property": bool(args.asserts_property),
+            "asserts_property": asserts_property_effective,
             "recorded_at": _now_iso(),
         },
         links=links,
