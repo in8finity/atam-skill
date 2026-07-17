@@ -448,6 +448,24 @@ def verb_audit(args) -> None:
 
     crypto = adapter.verify_work_package(wp, summary=args.summary)
 
+    # (R4 / F2) Read-path self-check: the whole verdict funnels through the
+    # structural gates, which read this work package via get_work_package. If that
+    # read were silently truncated (the F9 get_item_by_hash class of bug), the gates
+    # would certify over a partial view and could emit a false all-clear. Guard it:
+    # verify_work_package walks the WP independently and reports checked_items; the
+    # audit's own full-WP read must see at least that many records, or we refuse to
+    # certify.
+    expected_records = crypto.get("checked_items")
+    seen_records = len(adapter.get_work_package(wp))
+    read_path_truncated = (
+        isinstance(expected_records, int) and seen_records < expected_records
+    )
+    read_path = {
+        "expected_records": expected_records,
+        "seen_records": seen_records,
+        "ok": not read_path_truncated,
+    }
+
     # Structural sub-audit: re-use the same checks the P9 gate runs.
     findings = adapter.get_work_package(wp, type="Finding")
     superseded = set()
@@ -522,9 +540,21 @@ def verb_audit(args) -> None:
             qa_selected_count[qa_name] = qa_selected_count.get(qa_name, 0) + 1
     qas_zero_selected = sorted([n for n, c in qa_selected_count.items() if c == 0])
 
+    warnings = []
+    if read_path_truncated:
+        warnings.append(
+            f"R4 READ-PATH TRUNCATION: audit read {seen_records} records but "
+            f"verify_work_package walked {expected_records} — the structural gates "
+            "ran over a PARTIAL view, so the verdict cannot be trusted. trustworthy "
+            "forced false. Check for a capped/truncating read primitive (cf. the "
+            "get_item_by_hash 10k-scan class of bug)."
+        )
+
     _ok(
         work_package_id=wp,
         crypto=crypto,
+        read_path=read_path,
+        warnings=warnings,
         structural={
             "unchallenged_findings": unchallenged,
             "structural_only_findings": structural_only,
@@ -533,7 +563,8 @@ def verb_audit(args) -> None:
             "qas_with_zero_selected_scenarios": qas_zero_selected,
         },
         trustworthy=(
-            crypto.get("ok") and not unchallenged and not structural_only
+            crypto.get("ok") and read_path["ok"]
+            and not unchallenged and not structural_only
             and not asserting_unchallenged and not unflagged_property_nrs
             and not qas_zero_selected
         ),

@@ -279,9 +279,13 @@ $PY scripts/cli.py close-phase --workpackage "$WP" --phase 6 \
 
 # Audit one evaluation: crypto + structural checks combined.
 $PY scripts/cli.py audit --workpackage "$WP"
-# → trustworthy=true iff: crypto.ok AND no unchallenged R/TP/SP AND no
-#   structural-only consequence findings AND no asserting NRs unchallenged
-#   AND no QAs with zero selected scenarios.
+# → trustworthy=true iff: crypto.ok AND read_path.ok AND no unchallenged R/TP/SP
+#   AND no structural-only consequence findings AND no asserting NRs unchallenged
+#   AND no unflagged property-asserting NRs AND no QAs with zero selected scenarios.
+# (R4) read_path.ok compares the audit's own get_work_package read against
+#   verify_work_package's checked_items; if the audit ran over a TRUNCATED view
+#   (an F9 get_item_by_hash-class cap), it refuses to certify — the verdict funnels
+#   through the structural gates, so it must not be computed over a partial read.
 
 # Portfolio view across all evaluations in the store:
 $PY scripts/cli.py list-evaluations --with-status
