@@ -67,11 +67,19 @@ class HashharnessAdapter(McpAdapter):
         return items[:limit]
 
     def get_item_by_hash(self, record_sha256: str) -> dict[str, Any] | None:
-        all_items = self._store.find_items(limit=10000)
-        for it in all_items:
-            if it.get("record_sha256") == record_sha256:
-                return it
-        return None
+        # Route through hashharness's indexed record_sha256 resolver — O(1) on
+        # sqlite via the items_record_sha256 index, no truncation, cross-work-
+        # package by construction. The previous find_items(limit=10000) global
+        # grep silently returned None for any record outside the first 10 000
+        # rows of the untyped page (~69% of a 32k-record shared store as of
+        # 2026-07-17), disabling `cli.py challenge` and every other sha-
+        # resolving verb. Preserve the adapter's Optional[dict] contract by
+        # catching the store's not-found StorageError.
+        from hashharness.storage import StorageError  # lazy, same pattern as make_store
+        try:
+            return self._store.get_item_by_record_sha256(record_sha256)
+        except StorageError:
+            return None
 
     def get_work_package(
         self,
