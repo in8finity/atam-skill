@@ -261,14 +261,25 @@ def verb_close_phase(args) -> None:
     asserting_nrs_unchallenged: list[dict] = []
     unflagged_property_nrs: list[dict] = []
     qas_zero_selected: list[str] = []
+    qas_waived: list[str] = []
+    qas_waived_but_selected: list[str] = []
 
     # A2 (perf-miss feedback): at the P5 boundary, surface QAs with 0 selected
     # scenarios — an entire QA falling below the analysis cut by I/D math is a
     # decision the user should make explicitly, not a mechanical side effect.
+    # (R2b) A waiver is now first-class: a zero-selected QA with an explicit
+    # `waive-qa` record is an accepted decision (listed, not flagged); one without
+    # is the real gap. A QA that is BOTH waived AND has selected scenarios is a
+    # contradiction. A prose-only waiver (no record) can no longer satisfy A2.
     if args.phase == 5:
         qas = adapter.get_work_package(args.workpackage, type="QualityAttribute")
         scenarios = adapter.get_work_package(args.workpackage, type="Scenario")
         ratings = adapter.get_work_package(args.workpackage, type="ScenarioRating")
+        markers = adapter.get_work_package(args.workpackage, type="AtamEvidence")
+        waived_qas = {
+            m["attributes"]["waived_qa"]: m["attributes"].get("waiver_reason", "")
+            for m in markers if m.get("attributes", {}).get("waived_qa")
+        }
         ratings.sort(key=lambda r: r.get("created_at", ""))
         latest_rating: dict[str, dict] = {}
         for r in ratings:
@@ -281,14 +292,28 @@ def verb_close_phase(args) -> None:
             r = latest_rating.get(s["record_sha256"], {})
             if r.get("attributes", {}).get("selected_for_analysis"):
                 qa_selected[qa_name] = qa_selected.get(qa_name, 0) + 1
-        qas_zero_selected = sorted([n for n, c in qa_selected.items() if c == 0])
+        qas_zero_selected = sorted(
+            [n for n, c in qa_selected.items() if c == 0 and n not in waived_qas]
+        )
+        qas_waived = sorted([n for n, c in qa_selected.items() if n in waived_qas])
+        qas_waived_but_selected = sorted(
+            [n for n, c in qa_selected.items() if c > 0 and n in waived_qas]
+        )
         if qas_zero_selected:
             warnings.append(
-                f"A2: QAs with ZERO selected scenarios: {qas_zero_selected}. "
+                f"A2: QAs with ZERO selected scenarios and NO waiver: {qas_zero_selected}. "
                 "ATAM's I/D math has structurally buried these QAs — the one you "
                 "rate low-importance is exactly the one a latent measured problem "
                 "will blindside you on. Either add at least one leaf per QA "
-                "(per-QA coverage floor), or explicitly waive in the report."
+                "(per-QA coverage floor), or record an explicit `cli.py waive-qa`."
+            )
+        if qas_waived_but_selected:
+            warnings.append(
+                f"A2 WAIVER CONTRADICTION: {qas_waived_but_selected} are waived but "
+                "still have selected scenarios. A waiver means the QA is excluded from "
+                "the cut — mark its scenarios `create-scenario --not-selected`, or drop "
+                "the waiver. A prose-only waiver alongside a selected scenario is exactly "
+                "how a QA looks analyzed when it wasn't (finding F5)."
             )
 
     # A1: at the P8->P9 boundary, surface high/med findings that were never challenged.
@@ -432,7 +457,9 @@ def verb_close_phase(args) -> None:
         structural_only_findings=structural_only,
         asserting_nrs_unchallenged=asserting_nrs_unchallenged,
         unflagged_property_nrs=unflagged_property_nrs,
-        qas_zero_selected=qas_zero_selected)
+        qas_zero_selected=qas_zero_selected,
+        qas_waived=qas_waived,
+        qas_waived_but_selected=qas_waived_but_selected)
 
 
 def verb_audit(args) -> None:
@@ -521,10 +548,16 @@ def verb_audit(args) -> None:
                     "kinds_present": sorted(k for k in kinds if k),
                 })
 
-    # A2 QAs with 0 selected scenarios.
+    # A2 QAs with 0 selected scenarios — (R2b) waiver-aware: a zero-selected QA with
+    # an explicit waive-qa record is an accepted decision; one without is the gap; a
+    # waived QA that still has selected scenarios is a contradiction.
     qas = adapter.get_work_package(wp, type="QualityAttribute")
     scenarios = adapter.get_work_package(wp, type="Scenario")
     ratings = adapter.get_work_package(wp, type="ScenarioRating")
+    waived_qas = {
+        m["attributes"]["waived_qa"]
+        for m in markers if m.get("attributes", {}).get("waived_qa")
+    }
     ratings.sort(key=lambda r: r.get("created_at", ""))
     latest_rating: dict[str, dict] = {}
     for r in ratings:
@@ -538,7 +571,12 @@ def verb_audit(args) -> None:
         r = latest_rating.get(s["record_sha256"], {})
         if r.get("attributes", {}).get("selected_for_analysis"):
             qa_selected_count[qa_name] = qa_selected_count.get(qa_name, 0) + 1
-    qas_zero_selected = sorted([n for n, c in qa_selected_count.items() if c == 0])
+    qas_zero_selected = sorted(
+        [n for n, c in qa_selected_count.items() if c == 0 and n not in waived_qas]
+    )
+    qas_waived_but_selected = sorted(
+        [n for n, c in qa_selected_count.items() if c > 0 and n in waived_qas]
+    )
 
     warnings = []
     if read_path_truncated:
@@ -548,6 +586,11 @@ def verb_audit(args) -> None:
             "ran over a PARTIAL view, so the verdict cannot be trusted. trustworthy "
             "forced false. Check for a capped/truncating read primitive (cf. the "
             "get_item_by_hash 10k-scan class of bug)."
+        )
+    if qas_waived_but_selected:
+        warnings.append(
+            f"A2 WAIVER CONTRADICTION: {qas_waived_but_selected} are waived but still "
+            "have selected scenarios — resolve before certifying (finding F5)."
         )
 
     _ok(
@@ -561,12 +604,13 @@ def verb_audit(args) -> None:
             "asserting_nrs_unchallenged": asserting_unchallenged,
             "unflagged_property_nrs": unflagged_property_nrs,
             "qas_with_zero_selected_scenarios": qas_zero_selected,
+            "qas_waived_but_selected": qas_waived_but_selected,
         },
         trustworthy=(
             crypto.get("ok") and read_path["ok"]
             and not unchallenged and not structural_only
             and not asserting_unchallenged and not unflagged_property_nrs
-            and not qas_zero_selected
+            and not qas_zero_selected and not qas_waived_but_selected
         ),
     )
 
@@ -922,6 +966,35 @@ def verb_update_coverage(args) -> None:
 # risk-theme, recommendation). Thin wrappers so the whole graph is reachable from
 # one CLI with consistent JSON output, instead of dropping to raw create_item.
 # --------------------------------------------------------------------------- #
+
+
+def verb_waive_qa(args) -> None:
+    """(R2b) Record an explicit, reasoned waiver for a QA left below the analysis cut,
+    so the A2 gate can tell a deliberate waiver from a silently-dropped QA. A prose-only
+    waiver (no record) can no longer satisfy A2, and a waived QA that still has selected
+    scenarios is flagged as a contradiction."""
+    adapter = HashharnessAdapter()
+    evs = adapter.find_items(type="AtamEvidence", work_package_id=args.workpackage, limit=1000)
+    n = len(evs) + 1
+    spec = ItemSpec(
+        type="AtamEvidence",
+        work_package_id=args.workpackage,
+        title=f"qa-waiver: {args.qa}",
+        text=f"atam.evidence:{args.workpackage}.qa-waiver-{n}",
+        attributes={
+            "kind": "quote",
+            "pointer": f"qa-waiver:{args.qa}",
+            "waived_qa": args.qa,
+            "waiver_reason": args.reason,
+            "quoted_text": f"QA '{args.qa}' explicitly waived from the analysis cut: {args.reason}",
+            "recorded_at": _now_iso(),
+        },
+        links={"evaluation": args.evaluation_sha},
+    )
+    sha = adapter.create_item(spec)
+    _ok(waiver_sha=sha, waived_qa=args.qa,
+        note="Ensure this QA has no selected scenarios (create-scenario --not-selected), "
+             "or the A2 gate will flag a waived-but-selected contradiction.")
 
 
 def verb_create_qa(args) -> None:
@@ -1438,6 +1511,14 @@ def _make_parser() -> argparse.ArgumentParser:
     p_cq.add_argument("--refinements", default="")
     p_cq.add_argument("--motivated-by", default="", help="Comma-sep BusinessDriver shas")
     p_cq.set_defaults(fn=verb_create_qa)
+
+    # (R2b) explicit, recorded QA waiver — a prose-only waiver can't satisfy A2.
+    p_wq = sub.add_parser("waive-qa")
+    _common(p_wq)
+    p_wq.add_argument("--evaluation-sha", required=True)
+    p_wq.add_argument("--qa", required=True, help="QA name to waive from the analysis cut")
+    p_wq.add_argument("--reason", required=True, help="Why this QA is excluded (recorded)")
+    p_wq.set_defaults(fn=verb_waive_qa)
 
     p_cc = sub.add_parser("create-component")
     _common(p_cc)

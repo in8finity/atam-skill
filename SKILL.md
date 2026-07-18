@@ -92,7 +92,7 @@ Each phase: **(a)** do the work, **(b)** write the artifact, **(c)** show the us
 - Use `templates/utility-tree.md` and `references/quality-attributes.md`
 - Write `04-utility-tree.md`
 - **Gate:** user prioritizes leaves; agree on which (H,H) and (H,M) leaves to analyze
-- **(A2) Per-QA coverage floor:** require **at least one selected scenario per top-level QA**, regardless of (I,D) rating. The (H,H)/(H,M) cut is a useful default, but a whole QA falling below it is a decision the user should make explicitly, not a mechanical side effect. `close-phase --phase 5` warns when any QA has zero selected scenarios — these are exactly the QAs that "the one you rate low-importance is the one a latent measured problem will blindside you on" applies to. Either add a leaf or explicitly waive it in the P5 artifact.
+- **(A2) Per-QA coverage floor:** require **at least one selected scenario per top-level QA**, regardless of (I,D) rating. The (H,H)/(H,M) cut is a useful default, but a whole QA falling below it is a decision the user should make explicitly, not a mechanical side effect. `close-phase --phase 5` warns when any QA has zero selected scenarios — these are exactly the QAs that "the one you rate low-importance is the one a latent measured problem will blindside you on" applies to. Either add a leaf, or **(R2b)** record an explicit waiver with `cli.py waive-qa --qa <name> --reason "…"` — a *prose-only* waiver in the artifact no longer satisfies A2, and a QA that is waived but still has a selected scenario is flagged as a contradiction (finding F5).
 
 ### Phase 6 — Analyze architectural approaches
 - For each high-priority leaf from Phase 5:
@@ -221,6 +221,10 @@ $PY scripts/cli.py open-evaluation --workpackage "$WP" \
 # Build the ontology (A3: create-* verbs — no more raw create_item):
 $PY scripts/cli.py create-qa --workpackage "$WP" --evaluation-sha <SHA> \
     --name performance --priority-rank 1                       # → qa_sha
+# (R2b) Explicitly waive a QA from the analysis cut (a prose-only waiver won't
+# satisfy A2). Mark the QA's scenarios --not-selected too, or A2 flags a contradiction.
+$PY scripts/cli.py waive-qa --workpackage "$WP" --evaluation-sha <SHA> \
+    --qa modifiability --reason "lowest risk; append-only + versioned"   # → waiver_sha
 $PY scripts/cli.py create-component --workpackage "$WP" --evaluation-sha <SHA> \
     --name api-gateway --kind component --responsibility "..." # → component_sha
 $PY scripts/cli.py create-scenario --workpackage "$WP" --evaluation-sha <SHA> \
@@ -281,7 +285,8 @@ $PY scripts/cli.py close-phase --workpackage "$WP" --phase 6 \
 $PY scripts/cli.py audit --workpackage "$WP"
 # → trustworthy=true iff: crypto.ok AND read_path.ok AND no unchallenged R/TP/SP
 #   AND no structural-only consequence findings AND no asserting NRs unchallenged
-#   AND no unflagged property-asserting NRs AND no QAs with zero selected scenarios.
+#   AND no unflagged property-asserting NRs AND no unwaived zero-selected QAs
+#   AND no waived-but-selected QA contradictions (R2b).
 # (R4) read_path.ok compares the audit's own get_work_package read against
 #   verify_work_package's checked_items; if the audit ran over a TRUNCATED view
 #   (an F9 get_item_by_hash-class cap), it refuses to certify — the verdict funnels
@@ -321,6 +326,8 @@ The skill prefers Mode B when:
 4. that bank has **≥ 1 `AtamBankProbe` record** (mere version presence is not enough — `open-evaluation` counts probes and emits a `warnings[]` entry when zero, in which case Mode B adaptive selection returns closure on every tick and you should use manual mode instead).
 
 Otherwise fall back to **Mode A** (direct MCP calls; LLM drives `create_item` itself) or further fall back to file-only mode (artifact-driven, no audit trail).
+
+**(R2a) Announce degraded modes loudly — silence reads as trust.** When you fall back to **file-only** mode, say so to the user at the start (`⚠️ running file-only — findings will NOT be hash-chained or verifiable`), and render the **NO-AUDIT-TRAIL banner** at the top of `REPORT.md` (the mandatory audit-trail-status block in `templates/report.md`). A file-only report with no trail-status line is indistinguishable from an audited one (finding F3) — always fill the correct variant (Mode B verified / Mode A / file-only). In Mode B, put the workpackage id and the `cli.py audit` verdict in that block.
 
 ### Adaptive-control records (the new types added in schema v6)
 
@@ -429,7 +436,7 @@ See `references/cq-schemes.md` for the full Walton catalog (7 schemes, ~24 canon
 `close-phase --phase 5` runs **one** check and `--phase 9` runs **four**. None refuse — they print and proceed.
 
 **At P5:**
-- **(A2) `qas_zero_selected`** — QAs with zero selected scenarios. The (H,H)/(H,M) cut is a useful default but a whole QA falling below it is a decision the user should make explicitly. Add a leaf or waive in the artifact.
+- **(A2) `qas_zero_selected`** — QAs with zero selected scenarios **and no explicit waiver**. The (H,H)/(H,M) cut is a useful default but a whole QA falling below it is a decision the user should make explicitly. Add a leaf or record `cli.py waive-qa`. **(R2b)** `qas_waived` lists accepted waivers; `qas_waived_but_selected` flags the contradiction where a waived QA still has a selected scenario (finding F5 — how a QA looks analyzed when it wasn't).
 
 **At P9** (inspects every *current* / non-superseded Finding):
 - **§11 `unchallenged_findings`** — `R`/`TP`/`SP` at `high`/`med` with neither a `supersedes` revision nor a `challenge` marker. ATAM resists a verdict; an un-challenged risk lean is itself a bias.

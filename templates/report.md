@@ -5,6 +5,25 @@
 **Evaluator:** <name>
 **Method:** ATAM (Kazman, Klein, Clements — SEI)
 
+<!-- (R2a) AUDIT-TRAIL STATUS — MANDATORY. Pick exactly one variant below. A reader
+     must be able to tell at a glance whether these findings are hash-chained and
+     verifiable. Never delete this block: a report with no trail-status line reads as
+     trustworthy when it may not be (finding F3 — a file-only report is otherwise
+     indistinguishable from an audited one). -->
+
+<!-- Mode B (controller + hashharness): -->
+> **Audit trail:** ✅ hash-chained — workpackage `<atam.case.…>` · `cli.py audit` → `trustworthy=<true|false>` (crypto <ok>, <N> records). Findings/evidence are immutable and independently verifiable.
+
+<!-- Mode A (direct MCP records, no controller audit): -->
+> **Audit trail:** ◑ hash-chained (workpackage `<…>`), but not run through `cli.py audit` — no combined crypto+structural verdict. Re-run under Mode B to certify.
+
+<!-- File-only mode (NO hashharness): -->
+> ## ⚠️ NO AUDIT TRAIL — FILE-ONLY MODE
+> These findings were **not** recorded to a hash-chained store. Nothing here is
+> cryptographically verifiable, immutable, or independently checkable — the report is
+> a rendered artifact only. Treat severities and the "no verdict" stance accordingly.
+> To get a verifiable trail, re-run with hashharness available (Mode A/B).
+
 ## Executive summary
 <3–5 sentences: what was evaluated, top risk themes, headline recommendation>
 
