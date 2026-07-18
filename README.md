@@ -21,7 +21,7 @@ That sentence is the whole value proposition. Everything below supports it.
 
 2. **Measurement beats hand-waving — enforced.** For Performance / Scalability / Availability, a high-severity finding backed only by "I read the code and it looks slow" gets flagged at the gate. You either attach a measurement (an incident, a benchmark, a 10-line probe) or lower the severity. This is where structural reviews quietly fail; the skill makes the gap loud.
 
-3. **A trustworthy audit trail.** Findings, evidence, and phase gates are written as **hash-chained, append-only records** (via hashharness). Corrections are new records that *supersede* old ones — nothing is silently edited. `cli.py audit` gives a one-shot verdict: *cryptographically intact AND no unchallenged risks AND no structural-only severities*.
+3. **A trustworthy audit trail.** Findings, evidence, and phase gates are written as **hash-chained, append-only records** (via hashharness). Corrections are new records that *supersede* old ones — nothing is silently edited. `cli.py audit` gives a one-shot verdict: *cryptographically intact **AND** its own read path wasn't truncated **AND** no unchallenged risks, structural-only severities, unflagged property-asserting non-risks, or unwaived coverage gaps.*
 
 4. **Coverage you decided on, not coverage you drifted into.** The utility tree forces at least one scenario per quality attribute, and the gate warns when a whole QA was left unanalyzed — because *the QA you rated low-importance is the one a latent measured problem will blindside you on.*
 
@@ -75,6 +75,18 @@ That reframing — kept as `supersedes`, with the original preserved — is exac
 
 The point isn't that these are dramatic findings — it's that a review of a system *by its own author* still surfaced a silent-degradation risk, a false-verdict sensitivity point, and an honestly-flagged gap in its own evidence, **because the gates wouldn't let the loose reasoning through.**
 
+### The loop closed
+
+This isn't hypothetical — the skill *was* run against itself, and it worked so well it **broke on itself**. Mid-run, the §11 challenge step couldn't resolve **4 of 7 findings**: `get_item_by_hash` scanned only the first 10,000 of the store's 32,000+ records, so 69% were invisible — the tool's own trust-building step silently degraded by the very scalability limit it documents. That became the real headline finding (measured, not projected), and every recommendation was then implemented and verified, hardening the skill it evaluated:
+
+- **indexed record lookup** — replaces the 10k-capped scan (the headline fix)
+- **`NO-AUDIT-TRAIL` banner** in file-only mode, at open and in `REPORT.md` — a report can no longer look audited when it isn't
+- **auto-promotion + a backstop** for unflagged "O(1)/constant-time/scales" non-risks — the incident-proven blind spot
+- **a read-path self-check** — `audit` refuses to certify `trustworthy=true` if its own reads were truncated
+- **explicit `waive-qa`** — a prose-only coverage waiver can no longer satisfy the gate
+
+A self-review that measurably hardens the reviewer — the whole exchange recorded, end to end, in its own append-only audit chain.
+
 ---
 
 ## Three ways to run it
@@ -104,7 +116,7 @@ Files are the human-readable convenience; the **hashharness chain is the source 
 ## Under the hood (for the curious)
 
 - **Three execution modes**, chosen automatically: **Mode B** (the `scripts/cli.py` controller — adaptive, audit-trailed probe selection over a vetted question bank), **Mode A** (direct MCP records), or **file-only** (no audit trail). Mode B needs hashharness + a populated probe bank.
-- **The gates that make it trustworthy** (loud warnings, never silent refusals): unchallenged high/med risks, structural-only severities on measured QAs, property-asserting non-risks left unchallenged, and quality attributes with zero analyzed scenarios.
+- **The gates that make it trustworthy** (loud warnings, never silent refusals): unchallenged high/med risks; structural-only severities on measured QAs; property-asserting non-risks left unchallenged (flagged manually *or* auto-detected from "O(1)/constant-time/scales" language, with a report-time backstop); quality attributes with zero analyzed scenarios or only a prose-only waiver; a read-path self-check so the verdict can't be certified over a truncated view; and a `NO-AUDIT-TRAIL` banner when running file-only.
 - **The full method, verbs, gates, and house rules** live in [`SKILL.md`](SKILL.md); the ATAM ontology, quality-attribute taxonomy, architectural-approach catalog, probing-question banks, and Walton CQ schemes live in [`references/`](references/).
 
 ---
